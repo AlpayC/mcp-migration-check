@@ -1,0 +1,27 @@
+{
+  "name": "mcp-migration-check",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Deterministic readiness checker for the MCP 2026-07-28 specification break",
+  "license": "MIT",
+  "workspaces": [
+    "packages/core",
+    "packages/mcp",
+    "web"
+  ],
+  "scripts": {
+    "build": "npm run build -w @mcpcheck/core && npm run build -w @mcpcheck/mcp",
+    "check": "node --import tsx packages/core/src/cli.ts",
+    "mcp": "node --import tsx packages/mcp/src/index.ts",
+    "dev:web": "npm run dev -w web",
+    "typecheck": "tsc -p packages/core/tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.1",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0"
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "name": "@mcpcheck/core",
+  "version": "0.1.0",
+  "description": "Deterministic rule engine for MCP 2026-07-28 migration readiness",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "bin": {
+    "mcpcheck": "./src/cli.ts"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "picocolors": "^1.1.1"
+  }
+}
