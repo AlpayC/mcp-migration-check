@@ -1,0 +1,20 @@
+{
+  "name": "@mcpcheck/mcp",
+  "version": "0.1.0",
+  "description": "MCP server exposing the 2026-07-28 migration readiness checker as tools",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "mcpcheck-server": "./src/index.ts"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node --import tsx src/index.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@mcpcheck/core": "*",
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "zod": "^4.4.3"
+  }
+}
