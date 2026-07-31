@@ -1,8 +1,13 @@
 {
   "compilerOptions": {
     "target": "ES2022",
-    "module": "NodeNext",
-    "moduleResolution": "NodeNext",
+    // Bundler resolution, not NodeNext: every consumer of packages/core is a
+    // bundler (Next/Turbopack for the web app, esbuild for the skill script).
+    // NodeNext would force `.js` specifiers pointing at `.ts` sources, which in
+    // turn forced a custom webpack alias — and a custom webpack config makes
+    // `next build` fail outright on Next 16, where Turbopack is the default.
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
     "lib": ["ES2022"],
     "strict": true,
     "esModuleInterop": true,
