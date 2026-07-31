@@ -1,10 +1,23 @@
 node_modules/
 dist/
 .next/
+.open-next/
 out/
 *.log
 .env
 .env.local
+.dev.vars
 .DS_Store
 coverage/
 *.tsbuildinfo
+next-env.d.ts
+
+# Cloudflare
+.wrangler/
+cloudflare-env.d.ts
+
+# Skill eval runs. The fixtures and evals.json are checked in as test material;
+# the per-iteration outputs and the generated viewer are not.
+skill/mcp-migration-workspace/iteration-*/
+skill/mcp-migration-workspace/not-run/
+skill/mcp-migration-workspace/eval-review.html

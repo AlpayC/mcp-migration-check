@@ -6,22 +6,20 @@
   "license": "MIT",
   "workspaces": [
     "packages/core",
-    "packages/mcp",
     "web"
   ],
   "scripts": {
-    "build": "npm run build -w @mcpcheck/core && npm run build -w @mcpcheck/mcp",
-    "check": "node --import tsx packages/core/src/cli.ts",
-    "mcp": "node --import tsx packages/mcp/src/index.ts",
+    "build:skill": "node scripts/build-skill.mjs",
     "dev:web": "npm run dev -w web",
-    "typecheck": "tsc -p packages/core/tsconfig.json --noEmit"
+    "build:web": "npm run build -w web",
+    "test": "node --import tsx --test \"packages/core/test/*.test.ts\"",
+    "typecheck": "tsc -p packages/core/tsconfig.json --noEmit && tsc -p packages/core/tsconfig.test.json",
+    "pack:skill": "node scripts/build-skill.mjs && node scripts/pack-skill.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.20.1",
+    "esbuild": "^0.28.1",
     "tsx": "^4.19.2",
     "typescript": "^5.6.3"
-  },
-  "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.30.0"
   }
 }
