@@ -57,15 +57,25 @@ expect.
 
 ### Skill
 
+Download **[`mcp-migration.skill`](https://github.com/AlpayC/mcp-migration-check/releases/latest)**
+from the latest release and install it in Claude, then ask it to migrate a
+server. Or build it yourself:
+
 ```bash
 npm install
 npm run pack:skill   # → dist/mcp-migration.skill
 ```
 
-Install the `.skill` file in Claude, then ask it to migrate a server. The skill
-bundles a dependency-free copy of the rule engine, so the agent's diagnosis step
-is deterministic rather than a guess from reading code — and `references/`
-carries the per-rule remediation guidance for the part that follows.
+The skill bundles a dependency-free copy of the rule engine, so the agent's
+diagnosis step is deterministic rather than a guess from reading code — and
+`references/` carries the per-rule remediation guidance for the part that
+follows.
+
+**Not using Claude?** The bundled checker is a single file that needs nothing
+but Node, so any agent that can run a shell command — Codex, Cursor, whatever —
+can use it directly. Unzip the `.skill` (it is a zip) and run
+`scripts/mcpcheck.mjs`, or take it from `skill/mcp-migration/scripts/` in this
+repo. `references/remediation.md` is plain Markdown and reads fine on its own.
 
 Run the bundled checker directly if you want:
 
