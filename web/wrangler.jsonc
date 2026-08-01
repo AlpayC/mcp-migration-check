@@ -1,0 +1,25 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "main": ".open-next/worker.js",
+  "name": "mcp-migration-check",
+  "compatibility_date": "2025-03-25",
+  "compatibility_flags": [
+    // Next.js needs the Node.js APIs.
+    "nodejs_compat",
+    // Forces outbound fetch() through the public internet instead of letting it
+    // resolve to this zone's own origin. For a service whose whole job is
+    // fetching a user-supplied URL, that is a meaningful second line of defence
+    // behind the SSRF guard in packages/core/src/ssrf.ts.
+    "global_fetch_strictly_public"
+  ],
+  "assets": {
+    "directory": ".open-next/assets",
+    "binding": "ASSETS"
+  },
+  "services": [
+    {
+      "binding": "WORKER_SELF_REFERENCE",
+      "service": "mcp-migration-check"
+    }
+  ]
+}

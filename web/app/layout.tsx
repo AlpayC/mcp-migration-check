@@ -14,7 +14,21 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en">
-      <body>{children}</body>
+      <head>
+        {/* Loaded at runtime rather than via next/font so the build stays
+            network-independent. Falls back to the system stack. */}
+        <link rel="preconnect" href="https://fonts.googleapis.com" />
+        <link
+          rel="preconnect"
+          href="https://fonts.gstatic.com"
+          crossOrigin=""
+        />
+        <link
+          rel="stylesheet"
+          href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&display=swap"
+        />
+      </head>
+      <body className="min-h-dvh antialiased">{children}</body>
     </html>
   );
 }

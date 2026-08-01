@@ -3,13 +3,15 @@ const nextConfig = {
   // Import the workspace core package as TypeScript source.
   transpilePackages: ["@mcpcheck/core"],
   reactStrictMode: true,
-  webpack: (config) => {
-    // The core package uses NodeNext-style `.js` import specifiers that point
-    // at `.ts` sources. Teach the bundler to resolve them.
-    config.resolve.extensionAlias = {
-      ".js": [".ts", ".tsx", ".js", ".jsx"],
-    };
-    return config;
-  },
+  // No custom `webpack` block on purpose. Next 16 builds with Turbopack by
+  // default and fails outright if it finds one. The alias that used to live
+  // here existed only to map `.js` specifiers onto `.ts` sources; packages/core
+  // now uses Bundler resolution, so the specifiers are extensionless and
+  // Turbopack resolves them natively.
 };
 export default nextConfig;
+
+// Lets `next dev` see the Cloudflare bindings the Worker will have in
+// production, so local development and the deployed runtime agree.
+import { initOpenNextCloudflareForDev } from "@opennextjs/cloudflare";
+initOpenNextCloudflareForDev();
