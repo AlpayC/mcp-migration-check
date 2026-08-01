@@ -1,15 +1,15 @@
 # mcp-migration-check
 
 [![CI](https://github.com/AlpayC/mcp-migration-check/actions/workflows/ci.yml/badge.svg)](https://github.com/AlpayC/mcp-migration-check/actions/workflows/ci.yml)
-[![Live demo](https://img.shields.io/badge/demo-live-37d399)](https://mcp-migration-check.alpaycelik91.workers.dev)
+[![Live demo](https://img.shields.io/badge/demo-live-37d399)](https://mcp-migration-check.alpaycelik.workers.dev)
 [![License: MIT](https://img.shields.io/badge/license-MIT-6d8bff)](./LICENSE)
 
 **Will your MCP server survive the 2026-07-28 rewrite?**
 
-> **[Try it → mcp-migration-check.alpaycelik91.workers.dev](https://mcp-migration-check.alpaycelik91.workers.dev)**
+> **[Try it → mcp-migration-check.alpaycelik.workers.dev](https://mcp-migration-check.alpaycelik.workers.dev)**
 > Paste an MCP endpoint, get a graded report. Nothing to install, nothing stored.
 
-[![The web demo grading a live MCP endpoint: a C, one critical finding for the legacy initialize handshake, with the fix and a link to the spec section it derives from](./docs/screenshot.png)](https://mcp-migration-check.alpaycelik91.workers.dev)
+[![The web demo grading a live MCP endpoint: a C, one critical finding for the legacy initialize handshake, with the fix and a link to the spec section it derives from](./docs/screenshot.png)](https://mcp-migration-check.alpaycelik.workers.dev)
 
 The [Model Context Protocol](https://modelcontextprotocol.io) revision dated
 **2026-07-28** is the largest breaking change in the protocol's history: it
@@ -40,7 +40,7 @@ part that actually takes a week.
 ### Web demo
 
 Hosted at
-**[mcp-migration-check.alpaycelik91.workers.dev](https://mcp-migration-check.alpaycelik91.workers.dev)**,
+**[mcp-migration-check.alpaycelik.workers.dev](https://mcp-migration-check.alpaycelik.workers.dev)**,
 or run it yourself:
 
 ```bash
