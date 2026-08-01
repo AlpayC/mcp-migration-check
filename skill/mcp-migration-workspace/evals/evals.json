@@ -1,0 +1,19 @@
+{
+  "skill_name": "mcp-migration",
+  "evals": [
+    {
+      "id": 0,
+      "name": "full-migration-stateful-server",
+      "prompt": "unser acme-search-mcp läuft noch auf der alten MCP spec und ich hab gehört ab 2026-07-28 bricht das. kannst du den migrieren? liegt in acme-search-mcp/ — sag mir am ende bitte was du geändert hast",
+      "expected_output": "Diagnosis via the bundled checker, then an actual migration: session Map and Mcp-Session-Id routing removed, initialize/onsessioninitialized handling gone, logging + roots capabilities removed, per-session tenant resolution moved into the request path, and the SDK moved off @modelcontextprotocol/sdk onto the v2 packages (@modelcontextprotocol/server + /client). Plus a summary naming rule ids. Must NOT advise '@modelcontextprotocol/sdk@^2' — that version does not exist; v2 is a package rename.",
+      "files": ["acme-search-mcp/"]
+    },
+    {
+      "id": 1,
+      "name": "triage-false-positive-readiness",
+      "prompt": "kannst du mal prüfen ob mein notes-mcp server bereit ist für die 2026-07-28 spec? liegt im ordner notes-mcp/. bitte noch nichts umbauen, ich will erstmal wissen woran ich bin",
+      "expected_output": "Separates the two findings correctly. MCP002 is a FALSE POSITIVE — the sessionId at src/index.ts:24 is express-session for the admin UI, not MCP session state, and the MCP transport already uses sessionIdGenerator: undefined. MCP007 is REAL — the server is on the v1 @modelcontextprotocol/sdk line. Should not refactor anything (the user asked for diagnosis only), and should note MCP006 needs a live probe.",
+      "files": ["notes-mcp/"]
+    }
+  ]
+}
