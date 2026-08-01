@@ -1,0 +1,91 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  core:
+    name: engine
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
+
+      # The skill ships a generated copy of the engine. It has drifted before —
+      # a stale bundle means the skill and the web demo disagree about the rules
+      # while both look fine in isolation. Rebuild it and fail if it moved.
+      - name: Skill bundle is in sync with packages/core
+        run: |
+          npm run build:skill
+          if ! git diff --exit-code -- skill/mcp-migration/scripts/mcpcheck.mjs; then
+            echo "::error::skill/mcp-migration/scripts/mcpcheck.mjs is stale. Run 'npm run build:skill' and commit the result."
+            exit 1
+          fi
+
+      # End-to-end over the bundled script: the unit tests never touch the
+      # filesystem, so this is the only thing covering scan.ts and the CLI
+      # wiring. Asserts the exact rule ids, not just a non-zero exit.
+      - name: Fixtures produce the expected findings
+        run: |
+          set +e
+          acme=$(node skill/mcp-migration/scripts/mcpcheck.mjs \
+            --source skill/mcp-migration-workspace/fixtures/acme-search-mcp --json)
+          acme_code=$?
+          notes=$(node skill/mcp-migration/scripts/mcpcheck.mjs \
+            --source skill/mcp-migration-workspace/fixtures/notes-mcp --json)
+          notes_code=$?
+          set -e
+
+          [ "$acme_code" = "1" ]  || { echo "acme: expected exit 1, got $acme_code"; exit 1; }
+          [ "$notes_code" = "1" ] || { echo "notes: expected exit 1, got $notes_code"; exit 1; }
+
+          echo "$acme"  | jq -e '[.findings[].ruleId] == ["MCP001","MCP002","MCP003","MCP005","MCP007"]' > /dev/null
+          echo "$acme"  | jq -e '.grade.letter == "F"' > /dev/null
+
+          # notes-mcp is the triage fixture: MCP002 is a false positive
+          # (express-session, not MCP state) and MCP007 is real.
+          echo "$notes" | jq -e '[.findings[].ruleId] == ["MCP002","MCP007"]' > /dev/null
+          echo "$notes" | jq -e '.grade.letter == "D"' > /dev/null
+
+          echo "fixtures ok"
+
+  web:
+    name: web build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck -w web
+
+      - name: Build
+        run: npm run build -w web
