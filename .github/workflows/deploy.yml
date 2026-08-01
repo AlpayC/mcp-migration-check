@@ -1,0 +1,91 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "web/**"
+      - "packages/core/**"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/deploy.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Deploys are not cancelled mid-flight. A superseded build is wasted work; a
+# half-uploaded Worker is worse.
+concurrency:
+  group: deploy-worker
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: cloudflare workers
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Secrets cannot be read in a job-level `if`, so the gate lives here. A
+      # missing token reports a skip rather than a red X — the workflow lands
+      # before the secret does, and a repository that looks broken because a
+      # feature is not configured yet is its own small lie.
+      - id: gate
+        env:
+          TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          if [ -z "$TOKEN" ]; then
+            echo "::notice::CLOUDFLARE_API_TOKEN is not set — skipping the deploy. See DEPLOY.md."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-node@v4
+        if: steps.gate.outputs.ready == 'true'
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+        if: steps.gate.outputs.ready == 'true'
+
+      # The same gates CI applies. A deploy that skips them would be the one
+      # path to production that nothing checks.
+      - name: Typecheck
+        if: steps.gate.outputs.ready == 'true'
+        run: |
+          npm run typecheck
+          npm run typecheck -w web
+
+      - name: Test
+        if: steps.gate.outputs.ready == 'true'
+        run: npm test
+
+      - name: Deploy
+        if: steps.gate.outputs.ready == 'true'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: npm run deploy -w web
+
+      - name: Smoke test the deployed Worker
+        if: steps.gate.outputs.ready == 'true'
+        run: |
+          BASE="https://mcp-migration-check.alpaycelik.workers.dev"
+          for i in $(seq 1 6); do
+            CODE=$(curl -sS -o /dev/null -w "%{http_code}" --max-time 20 "$BASE/" || echo 000)
+            [ "$CODE" = "200" ] && break
+            echo "attempt $i: http=$CODE"; sleep 10
+          done
+          [ "$CODE" = "200" ] || { echo "::error::page did not return 200"; exit 1; }
+
+          # The SSRF guard is the one thing that must never regress in
+          # production, so the deploy is not considered done until it answers.
+          BODY=$(curl -sS --max-time 20 -X POST "$BASE/api/check" \
+            -H "content-type: application/json" \
+            -d '{"url":"http://169.254.169.254/"}')
+          echo "$BODY" | grep -q '"inconclusive":true' \
+            || { echo "::error::SSRF guard did not refuse the metadata address: $BODY"; exit 1; }
+          echo "deployed and answering"
