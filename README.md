@@ -1,6 +1,13 @@
 # mcp-migration-check
 
+[![CI](https://github.com/AlpayC/mcp-migration-check/actions/workflows/ci.yml/badge.svg)](https://github.com/AlpayC/mcp-migration-check/actions/workflows/ci.yml)
+[![Live demo](https://img.shields.io/badge/demo-live-37d399)](https://mcp-migration-check.alpaycelik91.workers.dev)
+[![License: MIT](https://img.shields.io/badge/license-MIT-6d8bff)](./LICENSE)
+
 **Will your MCP server survive the 2026-07-28 rewrite?**
+
+> **[Try it → mcp-migration-check.alpaycelik91.workers.dev](https://mcp-migration-check.alpaycelik91.workers.dev)**
+> Paste an MCP endpoint, get a graded report. Nothing to install, nothing stored.
 
 The [Model Context Protocol](https://modelcontextprotocol.io) revision dated
 **2026-07-28** is the largest breaking change in the protocol's history: it
@@ -30,14 +37,21 @@ part that actually takes a week.
 
 ### Web demo
 
+Hosted at
+**[mcp-migration-check.alpaycelik91.workers.dev](https://mcp-migration-check.alpaycelik91.workers.dev)**,
+or run it yourself:
+
 ```bash
 npm install
 npm run dev:web   # http://localhost:3000
 ```
 
-Paste an endpoint and read the graded report. The handler enforces an **SSRF
-guard**: it refuses `localhost`, private ranges, and the cloud metadata address,
-because it fetches a user-supplied URL server-side.
+Paste an endpoint and read the graded report. Because the handler fetches a
+user-supplied URL server-side, it enforces two things: an **SSRF guard** that
+refuses `localhost`, private ranges and the cloud metadata address, and a
+**rate limit** of 20 requests per minute per IP via Cloudflare's Workers
+binding. See [DEPLOY.md](./DEPLOY.md) for why neither lives where you might
+expect.
 
 ### Skill
 
@@ -96,6 +110,40 @@ signals in code. Each finding links the spec page it derives from.
 - **MCP007 is TypeScript-only.** It reads `package.json`, so a Python, Go or C#
   server gets no SDK signal at all — even though those SDKs also moved (Python
   and C# to 2.x, Go to a 1.x minor).
+
+## A rule that was wrong
+
+Worth recording, because it shaped how the rest is verified.
+
+MCP007 originally fired on `@modelcontextprotocol/sdk` below `2.0.0` and told
+you to upgrade to `^2` and run "the official v1→v2 codemod". Both halves were
+wrong in different ways, and neither was caught by reading the code — only by
+checking against npm and the spec:
+
+- `@modelcontextprotocol/sdk` has **never published a 2.x**. It tops out at
+  1.30.0. So the fix text named a version that does not resolve.
+- v2 exists, but as a **package rename**: `@modelcontextprotocol/server`,
+  `/client`, `/core`, `/node` and the HTTP adapters, all published 2026-07-27.
+- The codemod is real, and is its own package:
+  `npx @modelcontextprotocol/codemod@latest v1-to-v2 .`
+
+The first correction overshot — the rule was deleted outright on the conclusion
+that no v2 line existed at all, which is what the package rename makes it look
+like from the `sdk` package alone. It was reinstated once the new names turned
+up. It now keys on the *presence* of the v1 package rather than a version
+threshold, because the package name is the actual signal.
+
+Two tests exist so this cannot come back:
+
+```ts
+assert.ok(!/@modelcontextprotocol\/sdk[@^ ]*\^?2/.test(f.fix));  // no phantom 2.x
+assert.ok(!rule.specRef.includes("#"));                          // no dead anchor
+```
+
+The second one guards a related defect found the same way: every rule's
+`specRef` pointed at `…/2026-07-28#lifecycle` and similar, but the spec is split
+across subpages and has no such anchors — all seven links silently resolved to
+the overview page. They are now verified subpage URLs.
 
 ## Architecture
 
