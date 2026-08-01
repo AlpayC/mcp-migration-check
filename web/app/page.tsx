@@ -1,6 +1,7 @@
 "use client";
 
 import type { CheckResult, Finding, Severity } from "@mcpcheck/core";
+import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 
 import { AnimatedShinyText } from "@/components/ui/animated-shiny-text";
@@ -15,6 +16,8 @@ import { NumberTicker } from "@/components/ui/number-ticker";
 import { Ripple } from "@/components/ui/ripple";
 import { RippleButton } from "@/components/ui/ripple-button";
 import { cn } from "@/lib/utils";
+
+const REPO_URL = "https://github.com/AlpayC/mcp-migration-check";
 
 type Band = "ok" | "warn" | "bad";
 
@@ -412,25 +415,126 @@ export default function Home() {
           </section>
         )}
 
+        {/* ---------- skill ---------- */}
+        <BlurFade delay={0.1} inView>
+          <section className="relative mt-20 overflow-hidden rounded-2xl border border-white/10 bg-panel p-6 sm:p-7">
+            <BorderBeam
+              size={140}
+              duration={9}
+              colorFrom="#37d399"
+              colorTo="#6d8bff"
+              borderWidth={1.5}
+            />
+
+            <span className="font-mono text-[11px] uppercase tracking-[0.16em] text-muted">
+              The other half
+            </span>
+            <h2 className="mt-2 font-display text-2xl font-semibold tracking-tight">
+              This page tells you <span className="text-warn">what</span> breaks.
+              Fixing it takes a week.
+            </h2>
+            <p className="mt-3 max-w-[62ch] text-[14.5px] leading-relaxed text-muted">
+              A probe only sees the outside. Removing session state is a design
+              change no tool can make for you — the official codemod handles the
+              SDK rename and stops there, by its own description. So the same
+              rule engine also ships as an agent skill that reads the code,
+              triages what is real, and works through the rest in order.
+            </p>
+
+            <div className="mt-6 grid gap-4 sm:grid-cols-2">
+              <div className="rounded-xl border border-white/10 bg-raised p-4">
+                <div className="font-display text-[15px] font-semibold">
+                  Run it anywhere
+                </div>
+                <p className="mt-1 text-[13px] leading-relaxed text-muted">
+                  One file, no dependencies beyond Node. Works in any terminal,
+                  any agent, any CI.
+                </p>
+                <pre className="mt-3 overflow-x-auto rounded-lg border border-white/10 bg-input p-3 font-mono text-[12px] leading-relaxed text-foreground">
+                  <code>{`node mcpcheck.mjs --source ./my-server
+node mcpcheck.mjs https://example.com/mcp`}</code>
+                </pre>
+              </div>
+
+              <div className="rounded-xl border border-white/10 bg-raised p-4">
+                <div className="font-display text-[15px] font-semibold">
+                  Or install the skill
+                </div>
+                <p className="mt-1 text-[13px] leading-relaxed text-muted">
+                  Diagnosis plus the per-rule migration procedure, keyed by the
+                  rule ids above.
+                </p>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <GlareHover
+                    background="transparent"
+                    color="#a8bcff"
+                    opacity={0.35}
+                    size={200}
+                    duration={550}
+                    className="rounded-lg"
+                  >
+                    <a
+                      href={`${REPO_URL}/releases/latest`}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="block rounded-lg border border-accent/40 bg-accent/[0.14] px-3.5 py-2 text-[13px] font-medium text-foreground transition-colors hover:border-accent/70"
+                    >
+                      Download .skill
+                    </a>
+                  </GlareHover>
+                  <a
+                    href={REPO_URL}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="rounded-lg border border-white/10 bg-panel px-3.5 py-2 text-[13px] text-muted transition-colors hover:border-white/25 hover:text-foreground"
+                  >
+                    Read the source
+                  </a>
+                </div>
+              </div>
+            </div>
+          </section>
+        </BlurFade>
+
         {/* ---------- footer ---------- */}
-        <footer className="mt-20 flex flex-col gap-2 border-t border-white/10 pt-6 text-[13px] text-muted">
+        <footer className="mt-20 flex flex-col gap-4 border-t border-white/10 pt-6 text-[13px] text-muted">
           <span>
-            Deterministic checker · no LLM, no stored data. Findings are signals
-            to review against the canonical spec.
+            Deterministic checker · no LLM, no cookies, nothing stored. Findings
+            are signals to review against the canonical spec.
           </span>
-          <span>
-            This page checks a server from the outside. For the migration
-            itself there is an agent skill that reads the code —{" "}
+
+          <nav className="flex flex-wrap items-center gap-x-5 gap-y-2">
             <a
-              href="https://github.com/AlpayC"
+              href={REPO_URL}
               target="_blank"
               rel="noreferrer"
-              className="text-accent underline-offset-4 hover:underline"
+              className="transition-colors hover:text-foreground"
             >
-              source on GitHub
+              Source
             </a>
-            .
-          </span>
+            <a
+              href={`${REPO_URL}/releases/latest`}
+              target="_blank"
+              rel="noreferrer"
+              className="transition-colors hover:text-foreground"
+            >
+              Download the skill
+            </a>
+            <a
+              href="https://alpaycelik.dev"
+              target="_blank"
+              rel="noreferrer"
+              className="transition-colors hover:text-foreground"
+            >
+              alpaycelik.dev
+            </a>
+            <Link
+              href="/legal"
+              className="transition-colors hover:text-foreground"
+            >
+              Legal &amp; privacy
+            </Link>
+          </nav>
         </footer>
       </main>
     </div>
