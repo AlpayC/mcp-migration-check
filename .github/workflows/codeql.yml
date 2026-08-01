@@ -28,6 +28,16 @@ jobs:
           # scanning a project whose core is an SSRF guard is to hear about the
           # near misses, not only the certainties.
           queries: security-extended
+          config: |
+            paths-ignore:
+              # Generated from packages/core — findings here are duplicates of
+              # the source they were bundled from, reported at a line number
+              # that does not exist in any file anyone edits.
+              - skill/mcp-migration/scripts/mcpcheck.mjs
+              # Deliberately imperfect test material. notes-mcp carries an
+              # express-session without `secure` precisely so the checker has
+              # something to mis-flag; "fixing" it defeats the fixture.
+              - skill/mcp-migration-workspace/fixtures/**
 
       - uses: github/codeql-action/analyze@v3
         with:

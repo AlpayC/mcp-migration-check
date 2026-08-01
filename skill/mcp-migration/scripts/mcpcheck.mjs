@@ -352,14 +352,8 @@ async function scanSource(dir, opts = {}) {
   let filesScanned = 0;
   const files = await collectFiles(dir, maxFiles);
   for (const file of files) {
-    let content;
-    try {
-      const stat = await fs.stat(file);
-      if (stat.size > maxBytes) continue;
-      content = await fs.readFile(file, "utf8");
-    } catch {
-      continue;
-    }
+    const content = await readIfSmallEnough(file, maxBytes);
+    if (content === null) continue;
     filesScanned++;
     const lines = content.split(/\r?\n/);
     for (let i = 0; i < lines.length; i++) {
@@ -386,6 +380,20 @@ async function readSdkVersion(dir) {
     return typeof dep === "string" ? dep : null;
   } catch {
     return null;
+  }
+}
+async function readIfSmallEnough(file, maxBytes) {
+  let handle;
+  try {
+    handle = await fs.open(file, "r");
+    const stat = await handle.stat();
+    if (stat.size > maxBytes) return null;
+    return await handle.readFile("utf8");
+  } catch {
+    return null;
+  } finally {
+    await handle?.close().catch(() => {
+    });
   }
 }
 async function collectFiles(dir, cap) {

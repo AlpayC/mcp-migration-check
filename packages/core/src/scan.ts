@@ -42,14 +42,11 @@ export async function scanSource(
   const files = await collectFiles(dir, maxFiles);
 
   for (const file of files) {
-    let content: string;
-    try {
-      const stat = await fs.stat(file);
-      if (stat.size > maxBytes) continue;
-      content = await fs.readFile(file, "utf8");
-    } catch {
-      continue;
-    }
+    // Size check and read go through one file handle rather than stat-then-open.
+    // Two separate paths are a time-of-check/time-of-use race: the file that
+    // gets read need not be the file that was measured.
+    const content = await readIfSmallEnough(file, maxBytes);
+    if (content === null) continue;
     filesScanned++;
     const lines = content.split(/\r?\n/);
     for (let i = 0; i < lines.length; i++) {
@@ -88,6 +85,29 @@ async function readSdkVersion(dir: string): Promise<string | null> {
     return typeof dep === "string" ? dep : null;
   } catch {
     return null;
+  }
+}
+
+/**
+ * Read a file, or return null if it is too large or unreadable.
+ *
+ * The handle is opened once and both stat and read go through it, so nothing
+ * can be swapped underneath between the two.
+ */
+async function readIfSmallEnough(
+  file: string,
+  maxBytes: number,
+): Promise<string | null> {
+  let handle: import("node:fs/promises").FileHandle | undefined;
+  try {
+    handle = await fs.open(file, "r");
+    const stat = await handle.stat();
+    if (stat.size > maxBytes) return null;
+    return await handle.readFile("utf8");
+  } catch {
+    return null;
+  } finally {
+    await handle?.close().catch(() => {});
   }
 }
 
