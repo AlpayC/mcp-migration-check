@@ -67,7 +67,7 @@ export interface SourceMatch {
 export interface SourceContext {
   /** Keyed by signal name, e.g. `sessionId`, `logging`, `sampling`, `roots`. */
   matches: Record<string, SourceMatch[]>;
-  /** Detected `@modelcontextprotocol/sdk` version, or null if not found. */
+  /** Declared `@modelcontextprotocol/sdk` version (the v1 line), or null. */
   sdkVersion: string | null;
   filesScanned: number;
 }

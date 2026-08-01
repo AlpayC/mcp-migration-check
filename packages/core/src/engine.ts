@@ -1,5 +1,5 @@
-import { rules } from "./rules.js";
-import type { Finding, Grade, RuleContext, Severity } from "./types.js";
+import { rules } from "./rules";
+import type { Finding, Grade, RuleContext, Severity } from "./types";
 
 const PENALTY: Record<Severity, number> = {
   critical: 30,

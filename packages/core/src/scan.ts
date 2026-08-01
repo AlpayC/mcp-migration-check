@@ -1,6 +1,6 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import type { SourceContext, SourceMatch } from "./types.js";
+import type { SourceContext, SourceMatch } from "./types";
 
 /**
  * Static source scan.
@@ -70,6 +70,27 @@ export async function scanSource(
   return { matches, sdkVersion, filesScanned };
 }
 
+/**
+ * Read the declared `@modelcontextprotocol/sdk` version.
+ *
+ * That package name *is* the v1 line — it tops out at 1.30.0 and speaks the
+ * pre-2026-07-28 protocol. The v2 SDK ships under different names entirely
+ * (`@modelcontextprotocol/server`, `@modelcontextprotocol/client`), so the
+ * presence of this dependency is the signal, not the number after it.
+ */
+async function readSdkVersion(dir: string): Promise<string | null> {
+  try {
+    const raw = await fs.readFile(path.join(dir, "package.json"), "utf8");
+    const pkg = JSON.parse(raw);
+    const dep =
+      pkg.dependencies?.["@modelcontextprotocol/sdk"] ??
+      pkg.devDependencies?.["@modelcontextprotocol/sdk"];
+    return typeof dep === "string" ? dep : null;
+  } catch {
+    return null;
+  }
+}
+
 async function collectFiles(dir: string, cap: number): Promise<string[]> {
   const out: string[] = [];
   async function walk(current: string): Promise<void> {
@@ -93,17 +114,4 @@ async function collectFiles(dir: string, cap: number): Promise<string[]> {
   }
   await walk(dir);
   return out;
-}
-
-async function readSdkVersion(dir: string): Promise<string | null> {
-  try {
-    const raw = await fs.readFile(path.join(dir, "package.json"), "utf8");
-    const pkg = JSON.parse(raw);
-    const dep =
-      pkg.dependencies?.["@modelcontextprotocol/sdk"] ??
-      pkg.devDependencies?.["@modelcontextprotocol/sdk"];
-    return typeof dep === "string" ? dep : null;
-  } catch {
-    return null;
-  }
 }
