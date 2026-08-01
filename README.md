@@ -9,6 +9,8 @@
 > **[Try it → mcp-migration-check.alpaycelik91.workers.dev](https://mcp-migration-check.alpaycelik91.workers.dev)**
 > Paste an MCP endpoint, get a graded report. Nothing to install, nothing stored.
 
+[![The web demo grading a live MCP endpoint: a C, one critical finding for the legacy initialize handshake, with the fix and a link to the spec section it derives from](./docs/screenshot.png)](https://mcp-migration-check.alpaycelik91.workers.dev)
+
 The [Model Context Protocol](https://modelcontextprotocol.io) revision dated
 **2026-07-28** is the largest breaking change in the protocol's history: it
 makes the transport **stateless**, formalizes **OAuth 2.1** for remote servers,
