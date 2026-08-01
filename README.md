@@ -1,6 +1,7 @@
 # mcp-migration-check
 
 [![CI](https://github.com/AlpayC/mcp-migration-check/actions/workflows/ci.yml/badge.svg)](https://github.com/AlpayC/mcp-migration-check/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/AlpayC/mcp-migration-check?color=37d399&label=skill)](https://github.com/AlpayC/mcp-migration-check/releases/latest)
 [![Live demo](https://img.shields.io/badge/demo-live-37d399)](https://mcp-migration-check.alpaycelik.workers.dev)
 [![License: MIT](https://img.shields.io/badge/license-MIT-6d8bff)](./LICENSE)
 

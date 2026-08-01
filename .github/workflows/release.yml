@@ -1,0 +1,64 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build the artifact for"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: build and attach the skill
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      # A release is the one artifact strangers actually download, so it does
+      # not get built from an unverified tree.
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
+
+      - name: Pack the skill
+        run: npm run pack:skill
+
+      # pack-skill.mjs already checks the magic bytes. This checks the shape:
+      # a .skill Claude can install has SKILL.md under a single top folder, and
+      # entry names must use forward slashes.
+      - name: Verify the archive
+        run: |
+          unzip -l dist/mcp-migration.skill
+          unzip -l dist/mcp-migration.skill | grep -q "mcp-migration/SKILL.md" \
+            || { echo "::error::SKILL.md missing from the archive"; exit 1; }
+          if unzip -l dist/mcp-migration.skill | grep -q '\\'; then
+            echo "::error::archive contains backslash entry names"
+            exit 1
+          fi
+
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/mcp-migration.skill --clobber
+          else
+            gh release create "$TAG" dist/mcp-migration.skill \
+              --title "$TAG" \
+              --generate-notes
+          fi

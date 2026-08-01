@@ -1,0 +1,30 @@
+version: 2
+
+updates:
+  # npm workspaces are resolved from the root manifest, so one entry covers
+  # packages/core and web as well.
+  - package-ecosystem: npm
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Europe/Berlin
+    open-pull-requests-limit: 5
+    # Grouped so a routine week is one PR to review rather than eight. Majors
+    # stay separate: next, react and the OpenNext adapter have peer ranges that
+    # constrain each other, and that is worth reading in isolation.
+    groups:
+      patch-and-minor:
+        update-types: [minor, patch]
+    commit-message:
+      prefix: chore
+      include: scope
+
+  # Pinned action versions go stale silently and are a supply-chain surface.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: ci
