@@ -1,0 +1,10 @@
+{
+  // Typecheck-only project for the tests. They live outside `rootDir: src`, so
+  // they cannot join the build project without churning the emit layout.
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "types": ["node"]
+  },
+  "include": ["src/**/*", "test/**/*"]
+}
