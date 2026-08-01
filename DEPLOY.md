@@ -48,21 +48,43 @@ uploads the Worker. First run will ask you to authenticate with Wrangler.
 `npm run preview -w web` runs the app locally in workerd instead of Node, which
 catches runtime differences `next dev` cannot.
 
-## Rate limiting — do this in the dashboard, not in code
+## Rate limiting
 
-The API route deliberately has **no** rate limiting in application code. An
-in-process counter is worthless on Workers: every isolate keeps its own copy and
-cold ones start at zero, so it looks like protection while providing none.
+`/api/check` fetches a URL a stranger supplies, so it needs a brake. There are
+two ways to do that on Cloudflare, and only one of them applies here.
 
-The free plan includes exactly one rate-limiting rule. Spend it here:
+**A WAF rate limiting rule does not work for this deployment.** WAF rules are
+scoped to a *zone* — a domain in your Cloudflare account. This Worker is served
+from `*.workers.dev`, which is not a zone you control, so there is nothing to
+attach a rule to. That only becomes an option after putting the Worker on a
+custom domain.
 
-- **Security → WAF → Rate limiting rules → Create rule**
-- Match: `URI Path equals /api/check`
-- Rate: 10 requests per 1 minute, per IP
-- Action: Block, for 1 minute
+**The Workers rate limiting binding does work**, needs no zone, and is available
+on the free plan at no extra charge. It is declared in `wrangler.jsonc`:
 
-That is the only abuse control this deployment has, so do not skip it. Without
-it the endpoint is a free outbound HTTP client for anyone who finds it.
+```jsonc
+"ratelimits": [
+  { "name": "CHECK_RATE_LIMITER", "namespace_id": "1001",
+    "simple": { "limit": 20, "period": 60 } }
+]
+```
+
+and consumed in `web/app/api/check/route.ts` before the body is even parsed,
+keyed by `cf-connecting-ip` — a header Cloudflare's edge sets and a client
+cannot forge. Over the limit returns `429` with `retry-after: 60`.
+
+Note what this is not. Counting happens **per Cloudflare location** and is
+eventually consistent, so a geographically spread caller gets more than 20/min
+in total, and the boundary is approximate — a live test let 21 requests through
+before the first `429`. Cloudflare describes the binding as "permissive,
+eventually consistent, and intentionally designed to not be used as an accurate
+accounting system". It is a brake against casual abuse, not a quota.
+
+Requires Wrangler 4.36.0 or later; `period` accepts only `10` or `60`.
+
+Application code deliberately holds no counter of its own. An in-process counter
+is worthless on Workers: every isolate keeps its own copy and cold ones start at
+zero, so it looks like protection while providing none.
 
 ## Why the compatibility flags matter
 

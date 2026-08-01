@@ -16,6 +16,25 @@
     "directory": ".open-next/assets",
     "binding": "ASSETS"
   },
+  // Abuse control for /api/check, which fetches a URL a stranger supplies.
+  //
+  // This lives here rather than in a WAF rule because WAF rate limiting is
+  // scoped to a zone, and this Worker is served from *.workers.dev — there is
+  // no zone to attach a rule to. The binding needs neither.
+  //
+  // Counting is per Cloudflare location and eventually consistent, so the real
+  // ceiling is higher than 20/min for a geographically spread caller. It is a
+  // brake, not an accounting system. `period` accepts only 10 or 60.
+  "ratelimits": [
+    {
+      "name": "CHECK_RATE_LIMITER",
+      "namespace_id": "1001",
+      "simple": {
+        "limit": 20,
+        "period": 60
+      }
+    }
+  ],
   "services": [
     {
       "binding": "WORKER_SELF_REFERENCE",
