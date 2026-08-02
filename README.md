@@ -187,6 +187,16 @@ TypeScript · Node 22 · npm workspaces · Next.js 16 (App Router, Turbopack) ·
 React 19.2 · Tailwind v4 · Magic UI · Cloudflare Workers via OpenNext.
 No runtime LLM. MIT licensed.
 
+## Contributing
+
+Corrections to rules are the most useful thing you can send — this project has
+shipped one that was factually wrong, and the section above exists because of
+it. See [CONTRIBUTING.md](./CONTRIBUTING.md) for what a rule change needs, and
+[AGENTS.md](./AGENTS.md) for the invariants that CI enforces.
+
+Found a way past the SSRF guard on the hosted demo? That one goes to
+[SECURITY.md](./SECURITY.md), not to a public issue.
+
 ## License
 
 [MIT](./LICENSE)
