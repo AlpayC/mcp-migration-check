@@ -38,15 +38,58 @@ npm run build -w web      # production build, no Cloudflare involved
 
 ## Deploy
 
+**Deploys run in CI.** A push to `main` touching `web/`, `packages/core/` or the
+lockfile runs `.github/workflows/deploy.yml`: typecheck, tests, upload, then a
+smoke test. There is nothing to do by hand.
+
+The smoke test is the part worth keeping. It polls the page until it returns
+200, then posts `http://169.254.169.254/` to `/api/check` and fails the run
+unless the response is `inconclusive`. A successful upload does not prove the
+SSRF guard survived the deploy; this does.
+
+Two repository secrets make it work:
+
+| Secret | Value |
+| --- | --- |
+| `CLOUDFLARE_API_TOKEN` | Cloudflare → My Profile → API Tokens → *Edit Cloudflare Workers*, scoped to this account only |
+| `CLOUDFLARE_ACCOUNT_ID` | the account id from `wrangler whoami` |
+
+Without them the workflow reports a skip rather than a failure, so the repo does
+not look broken before the secrets exist.
+
+### Deploying by hand
+
+Still works, and is the fallback when CI is unavailable:
+
 ```bash
 npm run deploy -w web
 ```
 
 That runs `opennextjs-cloudflare build` (which invokes `next build`) and then
-uploads the Worker. First run will ask you to authenticate with Wrangler.
+uploads the Worker. The first run asks you to authenticate with Wrangler.
+
+One Windows trap: `next dev` holds a handle on `web/.open-next`, so a deploy
+started while a dev server is running dies with `EBUSY: resource busy or
+locked`. Stop the dev server first.
 
 `npm run preview -w web` runs the app locally in workerd instead of Node, which
 catches runtime differences `next dev` cannot.
+
+## Releases
+
+Tagging is the whole procedure:
+
+```bash
+git tag v0.3.0 && git push --tags
+```
+
+`.github/workflows/release.yml` then typechecks, tests, packs the skill,
+verifies the archive is a real zip with `SKILL.md` under a single top-level
+folder and no backslash entry names, and attaches it to the release. It runs on
+Ubuntu so packing takes the `zip` path rather than the bsdtar one.
+
+`workflow_dispatch` rebuilds the artifact for an existing tag, which is how the
+workflow itself was tested.
 
 ## Rate limiting
 
