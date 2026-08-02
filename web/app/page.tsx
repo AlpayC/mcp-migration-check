@@ -15,9 +15,8 @@ import { Marquee } from "@/components/ui/marquee";
 import { NumberTicker } from "@/components/ui/number-ticker";
 import { Ripple } from "@/components/ui/ripple";
 import { RippleButton } from "@/components/ui/ripple-button";
+import { AUTHOR_URL, RELEASES_URL, REPO_URL } from "@/lib/site";
 import { cn } from "@/lib/utils";
-
-const REPO_URL = "https://github.com/AlpayC/mcp-migration-check";
 
 type Band = "ok" | "warn" | "bad";
 
@@ -474,7 +473,7 @@ node mcpcheck.mjs https://example.com/mcp`}</code>
                     className="rounded-lg"
                   >
                     <a
-                      href={`${REPO_URL}/releases/latest`}
+                      href={RELEASES_URL}
                       target="_blank"
                       rel="noreferrer"
                       className="block rounded-lg border border-accent/40 bg-accent/[0.14] px-3.5 py-2 text-[13px] font-medium text-foreground transition-colors hover:border-accent/70"
@@ -513,7 +512,7 @@ node mcpcheck.mjs https://example.com/mcp`}</code>
               Source
             </a>
             <a
-              href={`${REPO_URL}/releases/latest`}
+              href={RELEASES_URL}
               target="_blank"
               rel="noreferrer"
               className="transition-colors hover:text-foreground"
@@ -521,7 +520,7 @@ node mcpcheck.mjs https://example.com/mcp`}</code>
               Download the skill
             </a>
             <a
-              href="https://alpaycelik.dev"
+              href={AUTHOR_URL}
               target="_blank"
               rel="noreferrer"
               className="transition-colors hover:text-foreground"

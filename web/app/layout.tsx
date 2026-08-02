@@ -1,4 +1,6 @@
 import type { Metadata } from "next";
+
+import { GitHubChip } from "@/components/github-chip";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -28,7 +30,10 @@ export default function RootLayout({
           href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&display=swap"
         />
       </head>
-      <body className="min-h-dvh antialiased">{children}</body>
+      <body className="min-h-dvh antialiased">
+        <GitHubChip />
+        {children}
+      </body>
     </html>
   );
 }
