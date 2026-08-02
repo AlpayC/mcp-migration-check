@@ -12,6 +12,10 @@ coverage/
 *.tsbuildinfo
 next-env.d.ts
 
+# Social/marketing drafts. Working notes, not project artifacts — and a public
+# repository is the wrong place for copy about the public repository.
+drafts/
+
 # Cloudflare
 .wrangler/
 cloudflare-env.d.ts
