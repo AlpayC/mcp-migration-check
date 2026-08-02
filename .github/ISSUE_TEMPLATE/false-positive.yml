@@ -1,0 +1,46 @@
+name: False positive or wrong finding
+description: A rule fired on something that is not actually a problem
+labels: ["false-positive"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        False positives are the failure mode that matters most here — a checker
+        nobody trusts is worse than no checker. Thanks for reporting one.
+
+  - type: input
+    id: rule
+    attributes:
+      label: Rule id
+      placeholder: MCP002
+    validations:
+      required: true
+
+  - type: textarea
+    id: output
+    attributes:
+      label: Checker output
+      description: |
+        Run with `--json` and paste the result. For a repository:
+        `node skill/mcp-migration/scripts/mcpcheck.mjs --source ./your-server --json`
+      render: json
+    validations:
+      required: true
+
+  - type: textarea
+    id: why
+    attributes:
+      label: Why this is not a real problem
+      description: |
+        The most useful reports explain the shape of the false positive. For
+        example: a `sessionId` match that is `express-session` for an admin UI
+        rather than MCP session state, on a transport that already runs with
+        `sessionIdGenerator: undefined`.
+    validations:
+      required: true
+
+  - type: input
+    id: source
+    attributes:
+      label: Source, if it can be shared
+      description: A repository link, an endpoint URL, or a minimal file.

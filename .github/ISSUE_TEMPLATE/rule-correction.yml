@@ -1,0 +1,56 @@
+name: Rule is wrong, or a rule is missing
+description: A rule states something the specification does not, or a breaking change is not covered
+labels: ["rules"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This project has shipped a rule that advised upgrading to an SDK version
+        that has never existed. Corrections backed by a citation are the most
+        useful contribution there is — see *A rule that was wrong* in the README.
+
+  - type: input
+    id: rule
+    attributes:
+      label: Rule id, or "new" if nothing covers it
+      placeholder: MCP007
+    validations:
+      required: true
+
+  - type: textarea
+    id: claim
+    attributes:
+      label: What the rule says now
+      description: Paste the `detail` or `fix` text that is wrong. Skip for a new rule.
+
+  - type: input
+    id: spec
+    attributes:
+      label: Spec page that settles it
+      description: |
+        A URL that resolves and states the change. Not the revision root —
+        the specification is split across subpages, and a link to the overview
+        page proves nothing.
+      placeholder: https://modelcontextprotocol.io/specification/2026-07-28/...
+    validations:
+      required: true
+
+  - type: textarea
+    id: correct
+    attributes:
+      label: What it should say
+    validations:
+      required: true
+
+  - type: dropdown
+    id: severity
+    attributes:
+      label: Severity, if this is a new rule
+      description: |
+        A deprecation with a twelve-month window is a warning. A change that
+        stops a server working on the new revision is critical.
+      options:
+        - "critical — the server breaks"
+        - "warning — deprecated, still functional"
+        - "info"
+        - "not applicable"
