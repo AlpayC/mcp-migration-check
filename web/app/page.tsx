@@ -1,7 +1,10 @@
 "use client";
 
-import { rulesVerifiedAt } from "@mcpcheck/core";
 import type { CheckResult, Finding, Severity } from "@mcpcheck/core";
+// From the rules subpath, not the package root. The root re-exports scanSource,
+// which imports node:fs — harmless for a type-only import because those are
+// erased, fatal for a value import in a client component.
+import { rulesVerifiedAt } from "@mcpcheck/core/rules";
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 
