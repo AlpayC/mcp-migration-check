@@ -13,6 +13,17 @@ var SPEC = {
   // This is the document that states which SDK line speaks which revision.
   sdk: "https://blog.modelcontextprotocol.io/posts/sdk-betas-2026-07-28/"
 };
+var SPEC_VERIFIED_AT = {
+  [SPEC.changelog]: "2026-08-01",
+  [SPEC.transport]: "2026-08-01",
+  [SPEC.logging]: "2026-08-01",
+  [SPEC.sampling]: "2026-08-01",
+  [SPEC.roots]: "2026-08-01",
+  [SPEC.authorization]: "2026-08-01",
+  // Checked against npm the following day, when the rename turned up.
+  [SPEC.sdk]: "2026-08-02"
+};
+var rulesVerifiedAt = Object.values(SPEC_VERIFIED_AT).sort()[0];
 function firstMatch(ctx, signal) {
   return ctx.source?.matches[signal]?.[0];
 }
@@ -566,6 +577,7 @@ function render(result) {
     out.push(`  spec:     ${f.specRef}`);
     out.push("");
   }
+  out.push(`Rules last verified against the spec: ${rulesVerifiedAt}`);
   return out.join("\n").trimEnd();
 }
 async function main() {

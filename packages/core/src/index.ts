@@ -6,7 +6,7 @@ import type { CheckResult } from "./types";
 
 export * from "./types";
 export { evaluate, gradeFrom } from "./engine";
-export { rules } from "./rules";
+export { rules, rulesVerifiedAt, SPEC_VERIFIED_AT } from "./rules";
 export { isSafePublicUrl } from "./ssrf";
 export { probeEndpoint } from "./probe";
 export { scanSource } from "./scan";

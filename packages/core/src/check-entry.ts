@@ -10,7 +10,7 @@
  * remediation sections key off. Output is plain text by default and JSON with
  * `--json`, because agents parse JSON more reliably than coloured columns.
  */
-import { checkLive, checkSource } from "./index";
+import { checkLive, checkSource, rulesVerifiedAt } from "./index";
 import type { CheckResult } from "./types";
 
 const HELP = `mcpcheck — MCP 2026-07-28 migration readiness
@@ -54,6 +54,9 @@ function render(result: CheckResult): string {
     out.push(`  spec:     ${f.specRef}`);
     out.push("");
   }
+  // Provenance, not decoration: these citations were read on a date, and a rule
+  // that quietly ages into wrong is the failure this project already had once.
+  out.push(`Rules last verified against the spec: ${rulesVerifiedAt}`);
   return out.join("\n").trimEnd();
 }
 

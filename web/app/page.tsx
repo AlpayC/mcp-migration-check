@@ -1,5 +1,6 @@
 "use client";
 
+import { rulesVerifiedAt } from "@mcpcheck/core";
 import type { CheckResult, Finding, Severity } from "@mcpcheck/core";
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
@@ -500,6 +501,12 @@ node mcpcheck.mjs https://example.com/mcp`}</code>
           <span>
             Deterministic checker · no LLM, no cookies, nothing stored. Findings
             are signals to review against the canonical spec.
+          </span>
+          <span className="text-muted/80">
+            Rules last verified against the spec on{" "}
+            <span className="font-mono">{rulesVerifiedAt}</span>. A citation can
+            stop being true without this page changing, so the date is stated
+            rather than implied.
           </span>
 
           <nav className="flex flex-wrap items-center gap-x-5 gap-y-2">

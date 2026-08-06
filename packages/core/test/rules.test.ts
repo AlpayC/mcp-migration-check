@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { evaluate } from "../src/engine";
-import { rules } from "../src/rules";
+import { rules, rulesVerifiedAt, SPEC_VERIFIED_AT } from "../src/rules";
 import type { ProbeContext, RuleContext, SourceContext, SourceMatch } from "../src/types";
 
 /**
@@ -186,6 +186,21 @@ test("no specRef relies on a page anchor", () => {
       `${rule.id} specRef relies on an anchor: ${rule.specRef}`,
     );
   }
+});
+
+test("every specRef carries a verification date, and none is in the future", () => {
+  const today = new Date().toISOString().slice(0, 10);
+  for (const rule of rules) {
+    const at = SPEC_VERIFIED_AT[rule.specRef];
+    assert.ok(at, `${rule.id} cites ${rule.specRef} with no entry in SPEC_VERIFIED_AT`);
+    assert.match(at, /^\d{4}-\d{2}-\d{2}$/, `${rule.id}: ${at} is not an ISO date`);
+    assert.ok(at <= today, `${rule.id} claims it was verified on ${at}, which is in the future`);
+  }
+});
+
+test("rulesVerifiedAt reports the oldest citation, not the newest", () => {
+  const oldest = Object.values(SPEC_VERIFIED_AT).sort()[0];
+  assert.equal(rulesVerifiedAt, oldest);
 });
 
 test("protocol rules cite a spec subpage, never the bare revision root", () => {

@@ -28,6 +28,33 @@ const SPEC = {
   sdk: "https://blog.modelcontextprotocol.io/posts/sdk-betas-2026-07-28/",
 } as const;
 
+/**
+ * When each citation was last read and confirmed by hand.
+ *
+ * Two kinds of claim live in this file and they age differently. "The transport
+ * removed Mcp-Session-Id" is anchored to a dated revision and does not rot.
+ * "The sdk package has no 2.x" is a statement about a registry at a moment in
+ * time, and it will be wrong eventually — quietly, which is exactly how the
+ * original MCP007 came to recommend a version that never existed.
+ *
+ * So the report says when it last checked rather than implying it just did.
+ * scripts/verify-spec-links.mjs re-reads every page on a schedule; this is the
+ * date a human last looked.
+ */
+export const SPEC_VERIFIED_AT: Record<string, string> = {
+  [SPEC.changelog]: "2026-08-01",
+  [SPEC.transport]: "2026-08-01",
+  [SPEC.logging]: "2026-08-01",
+  [SPEC.sampling]: "2026-08-01",
+  [SPEC.roots]: "2026-08-01",
+  [SPEC.authorization]: "2026-08-01",
+  // Checked against npm the following day, when the rename turned up.
+  [SPEC.sdk]: "2026-08-02",
+};
+
+/** The oldest citation date — what a report should quote, not the newest. */
+export const rulesVerifiedAt = Object.values(SPEC_VERIFIED_AT).sort()[0];
+
 /** Pick the first source match for a signal, if any, for location reporting. */
 function firstMatch(ctx: RuleContext, signal: string): SourceMatch | undefined {
   return ctx.source?.matches[signal]?.[0];
