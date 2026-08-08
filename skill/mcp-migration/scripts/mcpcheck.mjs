@@ -166,7 +166,7 @@ var rules = [
         title: "TypeScript SDK still on the v1 line",
         severity: "warning",
         detail: `package.json depends on @modelcontextprotocol/sdk (${v}). That package is the v1 line \u2014 it stops at 1.30.0 and speaks the pre-2026-07-28 protocol. v2 shipped under new names instead: @modelcontextprotocol/server and @modelcontextprotocol/client.`,
-        fix: "Migrate to @modelcontextprotocol/server / @modelcontextprotocol/client v2 (with @modelcontextprotocol/core, and the express/fastify/hono adapter you need). Run `npx @modelcontextprotocol/codemod@latest v1-to-v2 .` on a clean working tree for the mechanical renames, then fix what it leaves behind.",
+        fix: "There is no single v2 package to move to \u2014 pick by role. A server needs @modelcontextprotocol/server; a client needs @modelcontextprotocol/client; something that is both needs both. Add @modelcontextprotocol/core either way, plus the express/fastify/hono adapter for your HTTP layer. Then run `npx @modelcontextprotocol/codemod@latest v1-to-v2 .` on a clean working tree for the mechanical renames and fix what it leaves behind. Note v2 requires Zod 4.",
         specRef: SPEC.sdk,
         location: "package.json"
       };

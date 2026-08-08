@@ -199,16 +199,27 @@ issued specifically for them as the intended audience (RFC 8707).
 **Why the package name is the signal.** `@modelcontextprotocol/sdk` *is* the v1
 line. Its last release is `1.30.0` and it speaks the pre-2026-07-28 protocol.
 There is no `2.x` of that package and there never will be — v2 shipped under
-new names on 2026-07-27:
+new names on 2026-07-27.
 
-| Package | Role |
+**There is no single package to move to.** This is the part that trips people
+who read "upgrade to v2" and look for one dependency. The v1 package was
+monolithic; v2 is split by role, and the new packages were published at `2.0.0`
+from their very first prerelease — none of them ever had a 1.x. Pick what the
+project actually is:
+
+| Package | Take it when |
 |---|---|
-| `@modelcontextprotocol/server` | server implementation |
-| `@modelcontextprotocol/client` | client implementation |
-| `@modelcontextprotocol/core` | shared schema and protocol types |
-| `@modelcontextprotocol/node` | stdio / Node transports |
-| `@modelcontextprotocol/express` · `/fastify` · `/hono` | HTTP adapters |
-| `@modelcontextprotocol/server-legacy` | compatibility shim for v1-era servers |
+| `@modelcontextprotocol/server` | the project implements a server |
+| `@modelcontextprotocol/client` | the project consumes servers |
+| `@modelcontextprotocol/core` | always — shared schema and protocol types |
+| `@modelcontextprotocol/node` | you use the stdio transport |
+| `@modelcontextprotocol/express` · `/fastify` · `/hono` | pick the one matching your HTTP layer |
+| `@modelcontextprotocol/server-legacy` | you need to keep serving v1-era clients |
+
+A project that is both a server and a client takes both. Do not reach for
+`/client` reflexively because the migration guide mentions it — most servers do
+not need it, and an unused dependency is a thing somebody has to reason about
+later.
 
 **Do not advise `@modelcontextprotocol/sdk@^2`.** It does not resolve. This is a
 package *rename*, not a version bump, which is exactly why the finding is worth
