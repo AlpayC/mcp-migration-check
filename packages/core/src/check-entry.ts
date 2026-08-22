@@ -10,8 +10,8 @@
  * remediation sections key off. Output is plain text by default and JSON with
  * `--json`, because agents parse JSON more reliably than coloured columns.
  */
-import { checkLive, checkSource, rulesVerifiedAt } from "./index";
-import type { CheckResult } from "./types";
+import { checkLive, checkSource, rulesVerifiedAt } from './index';
+import type { CheckResult } from './types';
 
 const HELP = `mcpcheck — MCP 2026-07-28 migration readiness
 
@@ -32,58 +32,61 @@ function render(result: CheckResult): string {
   out.push(`Target: ${result.target}  (${result.mode})`);
 
   if (result.inconclusive) {
-    out.push(`Result: inconclusive — ${result.note ?? "no detail"}`);
-    return out.join("\n");
+    out.push(`Result: inconclusive — ${result.note ?? 'no detail'}`);
+    return out.join('\n');
   }
 
   out.push(`Grade:  ${result.grade.letter} (${result.grade.score}/100)`);
   if (result.note) out.push(result.note);
 
   if (result.findings.length === 0) {
-    out.push("");
-    out.push("No breaking-change signals found.");
-    return out.join("\n");
+    out.push('');
+    out.push('No breaking-change signals found.');
+    return out.join('\n');
   }
 
-  out.push("");
+  out.push('');
   for (const f of result.findings) {
     out.push(`[${f.severity.toUpperCase()}] ${f.title}  (${f.ruleId})`);
     if (f.location) out.push(`  at:       ${f.location}`);
     out.push(`  observed: ${f.detail}`);
     out.push(`  fix:      ${f.fix}`);
     out.push(`  spec:     ${f.specRef}`);
-    out.push("");
+    if (f.note) out.push(`  note:     ${f.note}`);
+    out.push('');
   }
   // Provenance, not decoration: these citations were read on a date, and a rule
   // that quietly ages into wrong is the failure this project already had once.
   out.push(`Rules last verified against the spec: ${rulesVerifiedAt}`);
-  return out.join("\n").trimEnd();
+  return out.join('\n').trimEnd();
 }
 
 async function main(): Promise<number> {
   const args = process.argv.slice(2);
-  if (args.length === 0 || args.includes("--help") || args.includes("-h")) {
+  if (args.length === 0 || args.includes('--help') || args.includes('-h')) {
     console.log(HELP);
     return args.length === 0 ? 2 : 0;
   }
 
-  const json = args.includes("--json");
-  const sourceIdx = args.indexOf("--source");
-  const localIdx = args.indexOf("--local");
+  const json = args.includes('--json');
+  const sourceIdx = args.indexOf('--source');
+  const localIdx = args.indexOf('--local');
 
   let result: CheckResult;
   if (sourceIdx !== -1) {
     const dir = args[sourceIdx + 1];
     if (!dir) {
-      console.error("--source requires a directory path");
+      console.error('--source requires a directory path');
       return 2;
     }
     result = await checkSource(dir);
   } else {
     const url =
-      localIdx !== -1 ? args[localIdx + 1] : args.find((a) => !a.startsWith("--"));
+      localIdx !== -1 ?
+        args[localIdx + 1]
+      : args.find((a) => !a.startsWith('--'));
     if (!url) {
-      console.error("Provide a URL, or use --source <dir>");
+      console.error('Provide a URL, or use --source <dir>');
       return 2;
     }
     result = await checkLive(url, { enforceSsrfGuard: localIdx === -1 });
@@ -92,7 +95,7 @@ async function main(): Promise<number> {
   console.log(json ? JSON.stringify(result, null, 2) : render(result));
 
   if (result.inconclusive) return 2;
-  return result.findings.some((f) => f.severity === "critical") ? 1 : 0;
+  return result.findings.some((f) => f.severity === 'critical') ? 1 : 0;
 }
 
 main().then(

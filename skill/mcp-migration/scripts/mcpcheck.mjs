@@ -13,7 +13,10 @@ var SPEC = {
   // The spec site has no SDK section — SDK releases are announced separately.
   // This is the document that states which SDK line speaks which revision.
   sdk: "https://blog.modelcontextprotocol.io/posts/sdk-betas-2026-07-28/",
-  pythonSdk: "https://py.sdk.modelcontextprotocol.io/migration/"
+  pythonSdk: "https://py.sdk.modelcontextprotocol.io/migration/",
+  // The official Rust SDK (rmcp) lives in its own repo, not the blog post
+  // above — that one covers only Python/TS/Go/C#. Verified 2026-08-22.
+  rustSdk: "https://github.com/modelcontextprotocol/rust-sdk"
 };
 var SPEC_VERIFIED_AT = {
   [SPEC.transport]: "2026-08-23",
@@ -27,7 +30,9 @@ var SPEC_VERIFIED_AT = {
   // Checked against npm the following day, when the rename turned up.
   [SPEC.sdk]: "2026-08-02",
   // Official v1-to-v2 guide: package constraint, import, and class rename.
-  [SPEC.pythonSdk]: "2026-08-27"
+  [SPEC.pythonSdk]: "2026-08-27",
+  // Verified by hand against the rust-sdk repo README (2026-08-22).
+  [SPEC.rustSdk]: "2026-08-22"
 };
 var rulesVerifiedAt = Object.values(SPEC_VERIFIED_AT).sort()[0];
 function firstMatch(ctx, signal) {
@@ -220,6 +225,63 @@ var rules = [
       };
     }
   },
+  {
+    id: "MCP010",
+    title: "Rust MCP SDK on a pre-2026-07-28 line",
+    severity: "warning",
+    specRef: SPEC.rustSdk,
+    evaluate(ctx) {
+      const deps = ctx.source?.sdkDependencies ?? [];
+      const RUST_MCP_CRATES = /* @__PURE__ */ new Set(["rmcp", "rust-mcp-sdk", "tower-mcp"]);
+      const rustMcpDeps = deps.filter(
+        (d) => d.ecosystem === "cargo" && RUST_MCP_CRATES.has(d.name)
+      );
+      for (const dep of rustMcpDeps) {
+        if (dep.name === "rmcp") {
+          const majorMatch = dep.constraint.match(/\d+/);
+          const major = majorMatch ? Number.parseInt(majorMatch[0], 10) : NaN;
+          if (typeof major === "number" && !Number.isNaN(major) && major < 3) {
+            return {
+              ruleId: "MCP010",
+              title: "Rust MCP SDK on a pre-2026-07-28 line",
+              severity: "warning",
+              detail: `Cargo.toml depends on ${dep.name} (${dep.constraint}). That is a pre-2026-07-28 line; rmcp 3.x is the current line speaking spec 2026-07-28.`,
+              fix: "Upgrade rmcp to 3.x (the current line speaking spec 2026-07-28).",
+              specRef: SPEC.rustSdk,
+              location: dep.manifest
+            };
+          }
+          continue;
+        }
+        if (dep.name === "rust-mcp-sdk") {
+          return {
+            ruleId: "MCP010",
+            title: "Rust MCP SDK on a pre-2026-07-28 line",
+            severity: "warning",
+            detail: `Cargo.toml depends on rust-mcp-sdk (${dep.constraint}). That crate only speaks the 2025-11-25 protocol; it never adopted 2026-07-28.`,
+            fix: "rust-mcp-sdk only speaks 2025-11-25; migrate to rmcp 3.x.",
+            specRef: SPEC.rustSdk,
+            location: dep.manifest
+          };
+        }
+        if (dep.name === "tower-mcp") {
+          if (dep.features && !dep.features.includes("protocol-2026-07-28")) {
+            return {
+              ruleId: "MCP010",
+              title: "Rust MCP SDK on a pre-2026-07-28 line",
+              severity: "warning",
+              detail: `Cargo.toml depends on tower-mcp (${dep.constraint}) without the protocol-2026-07-28 feature. That crate speaks 2026-07-28 only when that feature is enabled.`,
+              fix: "For tower-mcp, enable the protocol-2026-07-28 feature.",
+              specRef: SPEC.rustSdk,
+              location: dep.manifest
+            };
+          }
+          continue;
+        }
+      }
+      return null;
+    }
+  },
   // ---- Observations (MCP1xx) ----------------------------------------------
   // These carry `info` severity, which costs no points. They exist because a
   // report that cannot distinguish "still accepts legacy" from "only accepts
@@ -296,9 +358,28 @@ function gradeFrom(findings) {
   const letter = score >= 90 ? "A" : score >= 75 ? "B" : score >= 60 ? "C" : score >= 40 ? "D" : "F";
   return { score, letter };
 }
+function applyTestModuleDownrank(findings, ctx) {
+  const ranges = ctx.source?.testModuleRanges;
+  if (!ranges || ranges.length === 0) return findings;
+  for (const f of findings) {
+    const m = /^(.+):(\d+)$/.exec(f.location ?? "");
+    if (!m) continue;
+    const file = m[1];
+    const line = Number(m[2]);
+    const hit = ranges.find(
+      (r) => r.file === file && line >= r.start && line <= r.end
+    );
+    if (!hit) continue;
+    if (f.severity === "critical") f.severity = "warning";
+    else if (f.severity === "warning") f.severity = "info";
+    f.note = "Down-ranked: located in a #[cfg(test)] module";
+  }
+  return findings;
+}
 function evaluate(ctx) {
   const order = ["critical", "warning", "info"];
-  return rules.map((r) => r.evaluate(ctx)).filter((f) => f !== null).sort((a, b) => order.indexOf(a.severity) - order.indexOf(b.severity));
+  const findings = rules.map((r) => r.evaluate(ctx)).filter((f) => f !== null).sort((a, b) => order.indexOf(a.severity) - order.indexOf(b.severity));
+  return applyTestModuleDownrank(findings, ctx);
 }
 
 // packages/core/src/probe.ts
@@ -573,7 +654,7 @@ function advertisedMetadataUrl(header) {
 // packages/core/src/scan.ts
 import { promises as fs } from "node:fs";
 import path from "node:path";
-var SCANNABLE = /* @__PURE__ */ new Set([".ts", ".tsx", ".js", ".mjs", ".cjs", ".py", ".go"]);
+var SCANNABLE = /* @__PURE__ */ new Set([".ts", ".tsx", ".js", ".mjs", ".cjs", ".py", ".go", ".rs", ".toml"]);
 var IGNORED_DIRS = /* @__PURE__ */ new Set([
   "node_modules",
   ".git",
@@ -591,11 +672,15 @@ var IGNORED_DIRS = /* @__PURE__ */ new Set([
   ".mypy_cache",
   ".pytest_cache",
   ".ruff_cache",
-  ".tox"
+  ".tox",
+  // Rust build and vendoring directories.
+  "target",
+  ".cargo",
+  "vendor"
 ]);
 var SIGNAL_PATTERNS = {
-  initialize: /InitializeRequest|oninitialized|["']initialize["']|["']initialized["']/,
-  sessionId: /[Mm]cp-[Ss]ession-[Ii]d|mcpSessionId|mcp_session_id|get_session_id|session_id_generator|stateless_http\s*=\s*False|\bsessionId\b/,
+  initialize: /InitializeRequest|oninitialized|on_initialized|ClientLifecycleMode::Initialize|notifications\/initialized|["']initialize["']|["']initialized["']/,
+  sessionId: /[Mm]cp-[Ss]ession-[Ii]d|mcpSessionId|with_stateful_mode|stateful_mode|with_legacy_session_mode|Last-Event-ID|SseServer|sse_support|mcp_session_id|get_session_id|session_id_generator|stateless_http\s*=\s*False|\bsessionId\b/,
   logging: /["']logging["']|LoggingLevel|LoggingMessageNotification|send_log_message|\b(?:ctx|context)\.(?:debug|info|warning|error|critical|log)\s*\(|\blogging\b\s*:\s*\{/,
   sampling: /["']sampling["']|createMessage|create_message|SamplingMessage|\bsampling\b\s*:\s*\{/,
   roots: /["']roots["']|ListRootsRequest|RootsCapability|list_roots|\broots\b\s*:\s*\{/,
@@ -618,12 +703,104 @@ var SIGNAL_PATTERNS = {
    */
   modernEra: /io\.modelcontextprotocol\/(protocolVersion|clientCapabilities|clientInfo|serverInfo)|["']server\/discover["']|@modelcontextprotocol\/(server|client|core)\b|\bfrom\s+mcp\.server\s+import\s+[^#\n]*\bMCPServer\b|\bfrom\s+mcp\.server\.mcpserver(?:\.[A-Za-z_][\w.]*)?\s+import\b/
 };
+function detectTestModuleRanges(dir, file, content) {
+  const lines = content.split(/\r?\n/);
+  const ranges = [];
+  const rel = path.relative(dir, file);
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const cfgMatch = /#\[cfg\(test\)\]/.test(line);
+    if (!cfgMatch) continue;
+    let declIdx = i;
+    if (!/\bmod\s+\w+\s*[;{]/.test(line)) {
+      let j = i + 1;
+      while (j < lines.length && /^\s*#(!?)\[/.test(lines[j])) {
+        j++;
+      }
+      declIdx = j;
+    }
+    const declLine = lines[declIdx] ?? "";
+    const inline = /\bmod\s+\w+\s*\{/.test(declLine);
+    const fileBased = /\bmod\s+\w+\s*;\s*$/.test(declLine);
+    if (inline) {
+      const openCol = declLine.indexOf("{");
+      let depth = 0;
+      let inStr = null;
+      let inLineComment = false;
+      let inBlockComment = false;
+      let closedAt = -1;
+      for (let j = declIdx; j < lines.length; j++) {
+        const text = lines[j];
+        for (let c = j === declIdx ? openCol : 0; c < text.length; c++) {
+          const ch = text[c];
+          if (inLineComment) continue;
+          if (inBlockComment) {
+            if (ch === "*" && text[c + 1] === "/") {
+              inBlockComment = false;
+              c++;
+            }
+            continue;
+          }
+          if (inStr) {
+            if (ch === "\\") {
+              c++;
+              continue;
+            }
+            if (ch === inStr) inStr = null;
+            continue;
+          }
+          if (ch === "/" && text[c + 1] === "/") {
+            inLineComment = true;
+            break;
+          }
+          if (ch === "/" && text[c + 1] === "*") {
+            inBlockComment = true;
+            c++;
+            continue;
+          }
+          if (ch === '"') {
+            inStr = '"';
+            continue;
+          }
+          if (ch === "{" && text[c + 1] === "{") {
+            c++;
+            continue;
+          }
+          if (ch === "}" && text[c + 1] === "}") {
+            c++;
+            continue;
+          }
+          if (ch === "}") {
+            depth--;
+            if (depth === 0) {
+              closedAt = j;
+              break;
+            }
+            continue;
+          }
+          if (ch === "{") depth++;
+        }
+        inLineComment = false;
+        if (closedAt !== -1) break;
+      }
+      if (closedAt !== -1) {
+        ranges.push({ file: rel, start: i + 1, end: closedAt + 1 });
+      } else {
+        ranges.push({ file: rel, start: i + 1, end: lines.length });
+      }
+    } else if (fileBased) {
+      ranges.push({ file: rel, start: 1, end: lines.length });
+    }
+  }
+  return ranges;
+}
 async function scanSource(dir, opts = {}) {
   const maxFiles = opts.maxFiles ?? 5e3;
   const maxBytes = opts.maxBytesPerFile ?? 1e6;
   const matches = {};
   for (const key of Object.keys(SIGNAL_PATTERNS)) matches[key] = [];
   let filesScanned = 0;
+  const testModuleRanges = [];
   const files = await collectFiles(dir, maxFiles);
   for (const file of files) {
     const content = await readIfSmallEnough(file, maxBytes);
@@ -642,6 +819,10 @@ async function scanSource(dir, opts = {}) {
         }
       }
     }
+    if (path.extname(file) === ".rs") {
+      const ranges = detectTestModuleRanges(dir, file, content);
+      for (const r of ranges) testModuleRanges.push(r);
+    }
   }
   const pkg = await readPackageJson(dir);
   for (const name of pkg.modernPackages) {
@@ -656,7 +837,7 @@ async function scanSource(dir, opts = {}) {
       text: req.requirement
     });
   }
-  return { matches, sdkVersion: pkg.sdkVersion, pythonSdkRequirements, filesScanned };
+  return { matches, sdkVersion: pkg.sdkVersion, pythonSdkRequirements, filesScanned, sdkDependencies: await readCargoDependencies(dir), testModuleRanges };
 }
 function classifyPythonSdkSpecifier(specifier) {
   const value = specifier.trim().replace(/^(["'])(.*)\1$/, "$2").trim();
@@ -858,6 +1039,55 @@ async function readPackageJson(dir) {
     };
   } catch {
     return { sdkVersion: null, modernPackages: [] };
+  }
+}
+async function readCargoDependencies(dir) {
+  const ALLOWED = /* @__PURE__ */ new Set(["rmcp", "rust-mcp-sdk", "tower-mcp"]);
+  try {
+    const raw = await fs.readFile(path.join(dir, "Cargo.toml"), "utf8");
+    const lines = raw.split(/\r?\n/);
+    const deps = [];
+    let inTable = false;
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (trimmed.startsWith("[")) {
+        inTable = trimmed === "[dependencies]" || trimmed === "[dev-dependencies]" || trimmed === "[workspace.dependencies]";
+        continue;
+      }
+      if (!inTable) continue;
+      const m = trimmed.match(/^([A-Za-z0-9_-]+)\s*=\s*(.+)$/);
+      if (!m) continue;
+      const name = m[1];
+      if (!ALLOWED.has(name)) continue;
+      const rhs = m[2].trim();
+      let constraint = "";
+      const features = [];
+      if (rhs.startsWith("{")) {
+        const v = rhs.match(/version\s*=\s*"([^"]*)"/);
+        if (v) constraint = v[1];
+        const f = rhs.match(/features\s*=\s*\[([^\]]*)\]/);
+        if (f) {
+          for (const part of f[1].split(",")) {
+            const feat = part.trim().replace(/^"|"$/g, "");
+            if (feat) features.push(feat);
+          }
+        }
+      } else {
+        const v = rhs.match(/^"([^"]*)"$/);
+        if (v) constraint = v[1];
+      }
+      if (!constraint) continue;
+      deps.push({
+        ecosystem: "cargo",
+        name,
+        constraint,
+        manifest: "Cargo.toml",
+        ...features.length ? { features } : {}
+      });
+    }
+    return deps;
+  } catch {
+    return [];
   }
 }
 async function readIfSmallEnough(file, maxBytes) {
@@ -1079,6 +1309,7 @@ function render(result) {
     out.push(`  observed: ${f.detail}`);
     out.push(`  fix:      ${f.fix}`);
     out.push(`  spec:     ${f.specRef}`);
+    if (f.note) out.push(`  note:     ${f.note}`);
     out.push("");
   }
   out.push(`Rules last verified against the spec: ${rulesVerifiedAt}`);

@@ -21,6 +21,8 @@ export interface Finding {
   specRef: string;
   /** "live endpoint" or a `file:line` reference for source findings. */
   location?: string;
+  /** Optional annotation, e.g. why a finding was down-ranked. */
+  note?: string;
 }
 
 export interface Grade {
@@ -146,6 +148,8 @@ export interface SourceContext {
   filesScanned: number;
   /** All MCP SDK dependencies found across every manifest kind (npm + cargo). */
   sdkDependencies?: SdkDependency[];
+  /** Spans of `#[cfg(test)]` modules, used to down-rank test-code findings. */
+  testModuleRanges?: { file: string; start: number; end: number }[];
 }
 
 export interface RuleContext {
