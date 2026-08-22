@@ -12,6 +12,7 @@ saw, how to tell a real hazard from noise, and the shape of the fix.
 - [MCP007 — TypeScript SDK still on the v1 line](#mcp007--typescript-sdk-still-on-the-v1-line)
 - [MCP008 — `server/discover` not implemented](#mcp008--serverdiscover-not-implemented)
 - [MCP009 — Python SDK still on the v1 line](#mcp009--python-sdk-still-on-the-v1-line)
+- [MCP010 — Rust MCP SDK on a pre-2026-07-28 line](#mcp010--rust-mcp-sdk-on-a-pre-2026-07-28-line)
 - [MCP101 / MCP102 — compatibility observations](#mcp101--mcp102--compatibility-observations)
 
 Verify exact signatures and header names against the
@@ -392,6 +393,44 @@ official `mcp.server.fastmcp` path. A project using the separate third-party
 `fastmcp` distribution does not match it. A legacy constraint in a nested
 example or test project can still be intentional; use the reported
 `file:line` to decide whether that project ships the server under review.
+
+---
+
+## MCP010 — Rust MCP SDK on a pre-2026-07-28 line
+
+**Severity:** warning — worth **15** points.
+
+**What it means.** The project depends on a Rust MCP crate that speaks an
+older protocol revision. The three supported crates are:
+
+| Crate | Status | Fix |
+|-------|--------|-----|
+| `rmcp` | Current line for 2026-07-28 at major ≥ 3 | Upgrade to 3.x |
+| `rust-mcp-sdk` | Only speaks 2025-11-25 | Migrate to `rmcp` 3.x |
+| `tower-mcp` | Speaks 2026-07-28 only with the `protocol-2026-07-28` feature | Enable that feature |
+
+**How to fix.** Open `Cargo.toml` and update the dependency:
+
+```toml
+# rmcp — upgrade to 3.x
+[dependencies]
+rmcp = "3"
+
+# tower-mcp — enable the protocol feature
+[dependencies]
+tower-mcp = { version = "1", features = ["protocol-2026-07-28"] }
+```
+
+For `rust-mcp-sdk`, there is no upgrade path — that crate never adopted
+2026-07-28. Migrate to `rmcp` 3.x instead. The `rmcp` crate is the official
+Rust SDK maintained in the
+[modelcontextprotocol/rust-sdk](https://github.com/modelcontextprotocol/rust-sdk)
+repository.
+
+**Telling real from noise.** The rule checks `Cargo.toml` dependency
+declarations, not source imports. A workspace member that pins an old version
+for testing purposes may fire; use the reported `file:line` to decide whether
+that manifest ships the server under review.
 
 ---
 

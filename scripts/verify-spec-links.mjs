@@ -43,6 +43,8 @@ const MARKERS = {
     "2026-07-28",
   "https://py.sdk.modelcontextprotocol.io/migration/":
     "Migration Guide: v1 to v2",
+  "https://github.com/modelcontextprotocol/rust-sdk":
+    "official Rust Model Context Protocol SDK",
 };
 
 const TIMEOUT_MS = 20_000;

@@ -1,0 +1,13 @@
+[package]
+name = "rust-notes-mcp"
+version = "0.4.0"
+edition = "2021"
+publish = false
+
+# NOTE: this is TEST MATERIAL for the mcp-migration checker, not a real
+# project to "fix". The rmcp line below is deliberately old so the scan fires
+# MCP008; the session_id field is an admin-UI trap (see src/lib.rs).
+
+[dependencies]
+rmcp = "1.2.0"
+tokio = { version = "1", features = ["full"] }

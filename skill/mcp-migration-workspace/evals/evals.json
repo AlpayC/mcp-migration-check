@@ -12,8 +12,15 @@
       "id": 1,
       "name": "triage-false-positive-readiness",
       "prompt": "kannst du mal prüfen ob mein notes-mcp server bereit ist für die 2026-07-28 spec? liegt im ordner notes-mcp/. bitte noch nichts umbauen, ich will erstmal wissen woran ich bin",
-      "expected_output": "Separates the two findings correctly. MCP002 is a FALSE POSITIVE — the sessionId at src/index.ts:24 is express-session for the admin UI, not MCP session state, and the MCP transport already uses sessionIdGenerator: undefined. MCP007 is REAL — the server is on the v1 @modelcontextprotocol/sdk line. Should not refactor anything (the user asked for diagnosis only), and should note MCP006 needs a live probe.",
+      "expected_output": "Separates the two findings correctly. MCP002 is a FALSE POSITIVE — the session_id at src/lib.rs is an admin-UI cookie (AdminSession), not MCP session state, and the MCP transport is stateless stdio (no session map, no Mcp-Session-Id routing). MCP008 is REAL — Cargo.toml pins rmcp = \"1.2.0\", a pre-2026-07-28 line; rmcp 3.x is the current line. Should not refactor anything (the user asked for diagnosis only), and must NOT add Mcp-Session-Id handling or 'fix' the session_id — that is the trap, like notes-mcp.",
       "files": ["notes-mcp/"]
+    },
+    {
+      "id": 2,
+      "name": "triage-rust-false-positive-readiness",
+      "prompt": "kannst du mal prüfen ob mein rust-notes-mcp server bereit ist für die 2026-07-28 spec? liegt im ordner rust-notes-mcp/. bitte noch nichts umbauen, ich will erstmal wissen woran ich bin",
+      "expected_output": "Separates the two findings correctly. MCP002 is a FALSE POSITIVE — the session_id at src/lib.rs is an admin-UI cookie (AdminSession), not MCP session state, and the MCP transport is stateless stdio (no session map, no Mcp-Session-Id routing). MCP008 is REAL — Cargo.toml pins rmcp = \"1.2.0\", a pre-2026-07-28 line; rmcp 3.x is the current line. Should not refactor anything (the user asked for diagnosis only), and must NOT add Mcp-Session-Id handling or 'fix' the session_id — that is the trap, like notes-mcp.",
+      "files": ["rust-notes-mcp/"]
     }
   ]
 }

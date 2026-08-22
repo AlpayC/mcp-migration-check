@@ -78,7 +78,7 @@ running. They see different things and neither is a superset of the other:
 | | Source scan | Live probe |
 |---|---|---|
 | Sees | code, `package.json`, Python manifests, `file:line` | both protocol eras, headers, advertised capabilities, OAuth posture |
-| Finds | MCP001–005, **MCP007/MCP009** (SDK lines) | MCP001–006, **MCP008**, MCP101/102 |
+| Finds | MCP001–005, **MCP007/MCP009/MCP010** (SDK lines) | MCP001–006, **MCP008**, MCP101/102 |
 | Needs | a checkout | a reachable endpoint |
 
 Exit codes: `0` no critical findings · `1` at least one critical · `2`
@@ -118,12 +118,13 @@ it end to end.
 Sequence matters. Do it in this order, because later steps depend on earlier
 ones:
 
-1. **The SDK finding first** — MCP007 for TypeScript, MCP009 for Python. Doing
+1. **The SDK finding first** — MCP007 for TypeScript, MCP009 for Python, MCP010 for Rust. Doing
    this before the code changes means you refactor against the API you are
    going to keep, instead of refactoring twice. For MCP007, move to the v2
    packages and run the TypeScript codemod. For MCP009, move `mcp` to 2.x and
    follow the official Python migration guide (`FastMCP` → `MCPServer` is the
-   first import change). The remaining errors point at the architectural work.
+   first import change). For MCP010, upgrade `rmcp` to 3.x (the current line
+   speaking spec 2026-07-28). The remaining errors point at the architectural work.
 2. **MCP002 (session state)** — the deepest change, and the one most likely to
    surface hidden design assumptions.
 3. **MCP001 (legacy-only)** — add the modern request path and

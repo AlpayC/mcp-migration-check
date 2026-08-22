@@ -3,6 +3,7 @@ import path from "node:path";
 import type {
   PythonSdkLine,
   PythonSdkRequirement,
+  SdkDependency,
   SourceContext,
   SourceMatch,
 } from "./types";
@@ -17,7 +18,7 @@ import type {
  * for runtime behavior; the two complement each other.
  */
 
-const SCANNABLE = new Set([".ts", ".tsx", ".js", ".mjs", ".cjs", ".py", ".go"]);
+const SCANNABLE = new Set([".ts", ".tsx", ".js", ".mjs", ".cjs", ".py", ".go", ".rs", ".toml"]);
 const IGNORED_DIRS = new Set([
   "node_modules",
   ".git",
@@ -36,12 +37,16 @@ const IGNORED_DIRS = new Set([
   ".pytest_cache",
   ".ruff_cache",
   ".tox",
+  // Rust build and vendoring directories.
+  "target",
+  ".cargo",
+  "vendor",
 ]);
 
 const SIGNAL_PATTERNS: Record<string, RegExp> = {
-  initialize: /InitializeRequest|oninitialized|["']initialize["']|["']initialized["']/,
+  initialize: /InitializeRequest|oninitialized|on_initialized|ClientLifecycleMode::Initialize|notifications\/initialized|["']initialize["']|["']initialized["']/,
   sessionId:
-    /[Mm]cp-[Ss]ession-[Ii]d|mcpSessionId|mcp_session_id|get_session_id|session_id_generator|stateless_http\s*=\s*False|\bsessionId\b/,
+    /[Mm]cp-[Ss]ession-[Ii]d|mcpSessionId|with_stateful_mode|stateful_mode|with_legacy_session_mode|Last-Event-ID|SseServer|sse_support|mcp_session_id|get_session_id|session_id_generator|stateless_http\s*=\s*False|\bsessionId\b/,
   logging:
     /["']logging["']|LoggingLevel|LoggingMessageNotification|send_log_message|\b(?:ctx|context)\.(?:debug|info|warning|error|critical|log)\s*\(|\blogging\b\s*:\s*\{/,
   sampling:
@@ -131,7 +136,7 @@ export async function scanSource(
     });
   }
 
-  return { matches, sdkVersion: pkg.sdkVersion, pythonSdkRequirements, filesScanned };
+  return { matches, sdkVersion: pkg.sdkVersion, pythonSdkRequirements, filesScanned, sdkDependencies: await readCargoDependencies(dir) };
 }
 
 /**
@@ -418,6 +423,69 @@ async function readPackageJson(
     };
   } catch {
     return { sdkVersion: null, modernPackages: [] };
+  }
+}
+
+/**
+ * Read MCP-relevant crate dependencies from a `Cargo.toml`.
+ *
+ * Dependency-free, line-oriented parse: no TOML crate may be added because the
+ * skill bundle must stay lean. Only the three MCP framework crates are emitted;
+ * `mcp-server` (stale) and `rig-core` (not an MCP framework) are skipped. Both
+ * the inline-string form (`rmcp = "3.1.4"`) and the table form
+ * (`rmcp = { version = "3", features = [...] }`) are handled. Tolerant like
+ * `readSdkVersion`: a missing or unparseable manifest yields `[]`.
+ */
+async function readCargoDependencies(dir: string): Promise<SdkDependency[]> {
+  const ALLOWED = new Set(["rmcp", "rust-mcp-sdk", "tower-mcp"]);
+  try {
+    const raw = await fs.readFile(path.join(dir, "Cargo.toml"), "utf8");
+    const lines = raw.split(/\r?\n/);
+    const deps: SdkDependency[] = [];
+    let inTable = false;
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (trimmed.startsWith("[")) {
+        inTable =
+          trimmed === "[dependencies]" ||
+          trimmed === "[dev-dependencies]" ||
+          trimmed === "[workspace.dependencies]";
+        continue;
+      }
+      if (!inTable) continue;
+      const m = trimmed.match(/^([A-Za-z0-9_-]+)\s*=\s*(.+)$/);
+      if (!m) continue;
+      const name = m[1];
+      if (!ALLOWED.has(name)) continue;
+      const rhs = m[2].trim();
+      let constraint = "";
+      const features: string[] = [];
+      if (rhs.startsWith("{")) {
+        const v = rhs.match(/version\s*=\s*"([^"]*)"/);
+        if (v) constraint = v[1];
+        const f = rhs.match(/features\s*=\s*\[([^\]]*)\]/);
+        if (f) {
+          for (const part of f[1].split(",")) {
+            const feat = part.trim().replace(/^"|"$/g, "");
+            if (feat) features.push(feat);
+          }
+        }
+      } else {
+        const v = rhs.match(/^"([^"]*)"$/);
+        if (v) constraint = v[1];
+      }
+      if (!constraint) continue;
+      deps.push({
+        ecosystem: "cargo",
+        name,
+        constraint,
+        manifest: "Cargo.toml",
+        ...(features.length ? { features } : {}),
+      });
+    }
+    return deps;
+  } catch {
+    return [];
   }
 }
 
