@@ -1,0 +1,94 @@
+name: Publish to npm
+
+on:
+  push:
+    # Version tags only. `v*` would also match `v1`, the moving pointer the
+    # GitHub Action is consumed through — and moving that tag would then try to
+    # publish a release called "1" to npm.
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to publish"
+        required: true
+      dry-run:
+        description: "Pack and inspect without publishing"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  # Two things need this. npm exchanges it for a short-lived credential —
+  # trusted publishing, so there is no long-lived token in this repository at
+  # all — and for the provenance attestation tying the tarball to this run.
+  id-token: write
+
+jobs:
+  publish:
+    name: publish mcp-migration-check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref_name }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          registry-url: https://registry.npmjs.org
+
+      # Trusted publishing needs npm 11.5.1+, and Node 22 still bundles npm 10.
+      # Without this the publish fails with ENEEDAUTH — which reads like a
+      # missing token and sends you looking in exactly the wrong place.
+      - name: npm new enough to speak OIDC
+        run: npm install -g npm@^11
+
+      - run: npm ci
+
+      # `npx mcp-migration-check` is the thing strangers run first, so it does
+      # not get published from an unverified tree.
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
+
+      - name: Build the bundled CLI
+        run: npm run build:cli
+
+      # The published version is the git tag, not whatever is sitting in
+      # package.json. One source of truth, and no way to ship v0.2.0 as 0.1.0.
+      #
+      # --allow-same-version because the committed placeholder will sometimes
+      # already equal the tag — on the very first release it does. Without it
+      # `npm version` exits "Version not changed" and takes the publish with it.
+      - name: Take the version from the tag
+        env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: npm version --no-git-tag-version --allow-same-version "${TAG#v}"
+        working-directory: packages/cli
+
+      # The package is one generated file plus a README. If that file is
+      # missing or is not the engine, the publish is worse than useless —
+      # `npx` would hand people a broken command under a name they trust.
+      - name: Verify the tarball
+        working-directory: packages/cli
+        run: |
+          npm pack
+          tar -tzf mcp-migration-check-*.tgz
+          tar -tzf mcp-migration-check-*.tgz | grep -q "package/bin/mcpcheck.mjs" \
+            || { echo "::error::bin/mcpcheck.mjs missing from the tarball"; exit 1; }
+          node bin/mcpcheck.mjs --help | grep -q "MCP 2026-07-28" \
+            || { echo "::error::the packed binary does not run"; exit 1; }
+          rm -f mcp-migration-check-*.tgz
+
+      # No NODE_AUTH_TOKEN: authentication is the OIDC exchange above, against
+      # the trusted publisher configured on the package. There is deliberately
+      # no secret to leak, rotate, or find expired at the worst moment — npm
+      # caps write tokens at 90 days and is removing their publish rights
+      # outright. See DEPLOY.md for the one-time setup this depends on.
+      - name: Publish
+        if: github.event.inputs.dry-run != 'true'
+        working-directory: packages/cli
+        run: npm publish

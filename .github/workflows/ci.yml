@@ -33,14 +33,15 @@ jobs:
       - name: Test
         run: npm test
 
-      # The skill ships a generated copy of the engine. It has drifted before —
-      # a stale bundle means the skill and the web demo disagree about the rules
-      # while both look fine in isolation. Rebuild it and fail if it moved.
-      - name: Skill bundle is in sync with packages/core
+      # The skill and the npm package each ship a generated copy of the engine.
+      # It has drifted before — a stale bundle means a shipped artifact and the
+      # web demo disagree about the rules while both look fine in isolation.
+      # Rebuild both and fail if either moved.
+      - name: Engine bundles are in sync with packages/core
         run: |
-          npm run build:skill
-          if ! git diff --exit-code -- skill/mcp-migration/scripts/mcpcheck.mjs; then
-            echo "::error::skill/mcp-migration/scripts/mcpcheck.mjs is stale. Run 'npm run build:skill' and commit the result."
+          npm run build:bundles
+          if ! git diff --exit-code -- skill/mcp-migration/scripts/mcpcheck.mjs packages/cli/bin/mcpcheck.mjs; then
+            echo "::error::A generated engine bundle is stale. Run 'npm run build:bundles' and commit the result."
             exit 1
           fi
 
@@ -70,6 +71,55 @@ jobs:
           echo "$notes" | jq -e '.grade.letter == "D"' > /dev/null
 
           echo "fixtures ok"
+
+  action:
+    name: github action
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The action is the surface other repositories consume, and it is the one
+      # part of this project that no unit test reaches: composite `run:` blocks
+      # only ever execute on a runner. So run it here, against a fixture whose
+      # findings are already pinned by the engine job.
+      - name: Scan a fixture
+        id: scan
+        uses: ./
+        with:
+          source: skill/mcp-migration-workspace/fixtures/acme-search-mcp
+          fail-on: never
+
+      - name: Outputs match the fixture
+        env:
+          GRADE: ${{ steps.scan.outputs.grade }}
+          SCORE: ${{ steps.scan.outputs.score }}
+          CRITICAL: ${{ steps.scan.outputs.critical }}
+          FINDINGS: ${{ steps.scan.outputs.findings }}
+          BADGE: ${{ steps.scan.outputs.badge-url }}
+          REPORT: ${{ steps.scan.outputs.report-path }}
+        run: |
+          [ "$GRADE" = "F" ]    || { echo "grade: expected F, got $GRADE"; exit 1; }
+          [ "$SCORE" = "0" ]    || { echo "score: expected 0, got $SCORE"; exit 1; }
+          [ "$CRITICAL" = "2" ] || { echo "critical: expected 2, got $CRITICAL"; exit 1; }
+          [ "$FINDINGS" = "5" ] || { echo "findings: expected 5, got $FINDINGS"; exit 1; }
+          case "$BADGE" in https://img.shields.io/badge/*) ;; *) echo "badge: $BADGE"; exit 1;; esac
+          jq -e '.grade.letter == "F"' "$REPORT" > /dev/null
+
+      # `fail-on` is the whole point of putting this in a pipeline. If it does
+      # not redden a run, everyone gets a green check over a broken server.
+      - name: fail-on critical actually fails
+        id: gate
+        continue-on-error: true
+        uses: ./
+        with:
+          source: skill/mcp-migration-workspace/fixtures/acme-search-mcp
+          fail-on: critical
+          report-path: gate-report.json
+
+      - name: The gate reported failure
+        run: |
+          [ "${{ steps.gate.outcome }}" = "failure" ] \
+            || { echo "expected the gated step to fail, got ${{ steps.gate.outcome }}"; exit 1; }
 
   web:
     name: web build

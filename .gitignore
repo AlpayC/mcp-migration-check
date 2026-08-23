@@ -25,3 +25,8 @@ cloudflare-env.d.ts
 skill/mcp-migration-workspace/iteration-*/
 skill/mcp-migration-workspace/not-run/
 skill/mcp-migration-workspace/eval-review.html
+
+# Ecosystem report runs. The Markdown is the publishable artifact and is meant
+# to be committed when a snapshot is worth keeping; the JSON alongside it names
+# every server probed, which is a deliberately different thing to publish.
+reports/*.json

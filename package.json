@@ -10,11 +10,14 @@
   ],
   "scripts": {
     "build:skill": "node scripts/build-skill.mjs",
+    "build:cli": "node scripts/build-cli.mjs",
+    "build:bundles": "npm run build:skill && npm run build:cli",
     "dev:web": "npm run dev -w web",
     "build:web": "npm run build -w web",
     "test": "node --import tsx --test \"packages/core/test/*.test.ts\"",
     "typecheck": "tsc -p packages/core/tsconfig.json --noEmit && tsc -p packages/core/tsconfig.test.json",
-    "pack:skill": "node scripts/build-skill.mjs && node scripts/pack-skill.mjs"
+    "pack:skill": "node scripts/build-skill.mjs && node scripts/pack-skill.mjs",
+    "report:ecosystem": "node --import tsx scripts/ecosystem-report.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.20.1",
