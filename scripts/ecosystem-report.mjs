@@ -39,7 +39,6 @@
  *   --name-servers     Include a per-server table in the Markdown
  *   --fresh            Ignore today's checkpoint and probe everything again
  *   --no-dates         Skip repository dating (see below)
- *   --active-window <days>  How recent counts as maintained (default 180)
  *   --top-up           Re-date and re-render a finished report, probing nothing
  *   --from <path>      Which report JSON --top-up reads (default: today's)
  *
@@ -90,7 +89,6 @@ const NAME_SERVERS = has("name-servers");
 const FRESH = has("fresh");
 const SKIP_DATES = has("no-dates");
 const TOP_UP = has("top-up");
-const ACTIVE_WINDOW_DAYS = Number(flag("active-window", "180"));
 
 /**
  * The day the revision shipped. A repository whose last commit predates it
@@ -337,14 +335,19 @@ async function saveDateCache(path, cache, now) {
 /**
  * Attach a maintenance verdict to each probed row.
  *
- * `active` / `stale` come from the repository push date where one was
- * obtainable and from the registry entry's own date otherwise, and the row
- * records which — the two are not the same claim, and a report that blends
- * them is back to guessing.
+ * The cut is the day the revision shipped, not a rolling window. A 180-day
+ * window was the first attempt and it separated nothing: 98.6% of the rows
+ * carrying a real commit date landed inside it, because both the registry and
+ * this revision are months old. Asking instead whether the code moved *after
+ * 2026-07-28* is the question the number is for, and it splits the sample
+ * roughly in half.
+ *
+ * The date is a repository push where one was obtainable and the registry
+ * entry's own timestamp otherwise, and the row records which. The two are not
+ * the same claim, and a report that blends them without saying so is back to
+ * guessing.
  */
 function attachActivity(probed, cache, now) {
-  const cutoff = new Date(now).getTime() - ACTIVE_WINDOW_DAYS * DAY_MS;
-
   for (const row of probed) {
     const key = githubRepoKey(row.repository);
     const repo = key ? cache.get(key) : undefined;
@@ -365,9 +368,11 @@ function attachActivity(probed, cache, now) {
     row.repositoryMissing = Boolean(repo?.missing);
     row.touchedSinceSpec = at ? at.slice(0, 10) >= SPEC_RELEASED_AT : null;
 
+    // Archived beats the date. A repository its owner froze is not a
+    // maintainer declining to migrate, however recent its last commit is.
     if (repo?.archived || repo?.missing) row.activity = "archived";
     else if (!at) row.activity = "undated";
-    else row.activity = new Date(at).getTime() >= cutoff ? "active" : "stale";
+    else row.activity = row.touchedSinceSpec ? "touched" : "untouched";
   }
 }
 
@@ -489,8 +494,8 @@ const OUTCOME_LABEL = {
  * source is printed underneath instead.
  */
 const ACTIVITY_LABEL = {
-  active: "last activity within the window",
-  stale: "last activity older than the window",
+  touched: `last activity on or after ${SPEC_RELEASED_AT}`,
+  untouched: `last activity before ${SPEC_RELEASED_AT}`,
   archived: "repository archived, disabled or gone",
   undated: "no date could be obtained",
 };
@@ -539,9 +544,23 @@ function summarize(probed) {
 
   // Servers whose repository has not been touched since the revision shipped
   // cannot have migrated — counting them as "declined to migrate" is the
-  // mistake that inflates a headline.
-  const touchedSinceSpec = graded.filter((p) => p.touchedSinceSpec === true);
+  // mistake that inflates a headline. Taken from the bucket rather than the
+  // raw flag so the headline and the table below can never disagree: an
+  // archived repository has a date but is not a maintainer declining anything.
+  const touchedSinceSpec = graded.filter((p) => p.activity === "touched");
   const legacyAmongTouched = touchedSinceSpec.filter((p) => p.era === "legacy").length;
+
+  // The same number split by which date it rests on. The two disagree by a
+  // wide margin, and a reader who cannot see that cannot judge the headline.
+  const touchedBySource = {};
+  for (const src of ["repository", "registry"]) {
+    const rows = touchedSinceSpec.filter((p) => p.activitySource === src);
+    touchedBySource[src] = {
+      total: rows.length,
+      legacy: rows.filter((p) => p.era === "legacy").length,
+      unknownEra: rows.filter((p) => p.era === "unknown").length,
+    };
+  }
 
   const ruleCounts = Object.fromEntries(rules.map((r) => [r.id, 0]));
   for (const p of graded) {
@@ -563,6 +582,7 @@ function summarize(probed) {
     dateSources,
     touchedSinceSpec: touchedSinceSpec.length,
     legacyAmongTouched,
+    touchedBySource,
     repoLinked,
     weakened,
     ruleCounts,
@@ -582,6 +602,7 @@ function renderMarkdown({ probed, summary, entries, localOnly, startedAt, dateSt
     dateSources,
     touchedSinceSpec,
     legacyAmongTouched,
+    touchedBySource,
     repoLinked,
     weakened,
     ruleCounts,
@@ -621,6 +642,25 @@ function renderMarkdown({ probed, summary, entries, localOnly, startedAt, dateSt
         "is the number worth arguing about. The rest of the sample has not been " +
         "edited since the revision shipped, so it is not evidence of anyone " +
         "declining to move.",
+    );
+    out.push("");
+
+    // That figure rests on two dates of very different strength, and they do
+    // not agree. Printing the blend without the split would hide the weaker
+    // half inside a confident-looking number.
+    const byRepo = touchedBySource.repository;
+    const byReg = touchedBySource.registry;
+    out.push(
+      `Those two words, "or registry entry", carry a lot. Split by which date ` +
+        `the row rests on: of the ${byRepo.total} dated by a repository push, ` +
+        `${pct(byRepo.legacy, byRepo.total)} are legacy-only; of the ` +
+        `${byReg.total} resting on a registry timestamp, ` +
+        `${pct(byReg.legacy, byReg.total)} are. Some of that gap is composition ` +
+        `rather than substance — the registry-dated group has ` +
+        `${pct(byReg.unknownEra, byReg.total)} whose era could not be ` +
+        `determined at all, against ${pct(byRepo.unknownEra, byRepo.total)} ` +
+        `among the repository-dated — but the stronger signal is also the less ` +
+        `flattering one, and it is the half to trust.`,
     );
     out.push("");
   }
@@ -680,8 +720,12 @@ function renderMarkdown({ probed, summary, entries, localOnly, startedAt, dateSt
       "aggregate percentage charges the whole ecosystem for what is largely a " +
       "graveyard. Where a registry entry links a GitHub repository, the table " +
       "below uses that repository's last push; otherwise it falls back to the " +
-      `date the registry entry itself was last updated. "Within the window" ` +
-      `means the last ${ACTIVE_WINDOW_DAYS} days.`,
+      "date the registry entry itself was last updated. The line is the day " +
+      `the revision shipped, ${SPEC_RELEASED_AT}, rather than a rolling ` +
+      "window: a 180-day window was the first attempt and it separated " +
+      "nothing, because 98.6% of the rows carrying a real commit date fell " +
+      "inside it. Both the registry and this revision are too young for that " +
+      "question to mean anything.",
   );
   out.push("");
   out.push(`| | ${Object.keys(ERA_LABEL).join(" | ")} | All |`);
@@ -962,7 +1006,7 @@ await writeFile(
       dateSources: summary.dateSources,
       touchedSinceSpec: summary.touchedSinceSpec,
       legacyAmongTouched: summary.legacyAmongTouched,
-      activeWindowDays: ACTIVE_WINDOW_DAYS,
+      touchedBySource: summary.touchedBySource,
       specReleasedAt: SPEC_RELEASED_AT,
       dateStats,
       withCritical: summary.withCritical,

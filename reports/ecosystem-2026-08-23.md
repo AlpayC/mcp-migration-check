@@ -4,7 +4,9 @@ The MCP revision dated **2026-07-28** removed protocol-level sessions, formalize
 
 **60.1% of the 10890 graded endpoints serve the legacy protocol only** — they answer the removed `initialize` handshake and no modern surface responded. A further 5.5% are dual-era: they serve 2026-07-28 *and* keep answering the old handshake, which the revision explicitly permits and this report does not count against them.
 
-**Narrowed to servers that could have migrated** — the 6495 whose repository or registry entry has been touched since 2026-07-28 — 63.0% are still legacy-only. That is the number worth arguing about. The rest of the sample has not been edited since the revision shipped, so it is not evidence of anyone declining to move.
+**Narrowed to servers that could have migrated** — the 6191 whose repository or registry entry has been touched since 2026-07-28 — 63.8% are still legacy-only. That is the number worth arguing about. The rest of the sample has not been edited since the revision shipped, so it is not evidence of anyone declining to move.
+
+Those two words, "or registry entry", carry a lot. Split by which date the row rests on: of the 4325 dated by a repository push, 74.5% are legacy-only; of the 1866 resting on a registry timestamp, 39.0% are. Some of that gap is composition rather than substance — the registry-dated group has 48.9% whose era could not be determined at all, against 18.6% among the repository-dated — but the stronger signal is also the less flattering one, and it is the half to trust.
 
 ## Sample
 
@@ -40,12 +42,12 @@ For reference: 7230 of 10890 graded endpoints (66.4%) carry at least one critica
 
 ## Maintained, or just still listed?
 
-A dead endpoint that returns 200 is indistinguishable from a maintained one that chose not to migrate — unless you can date it. The registry skews heavily toward servers listed once and never touched again, so an aggregate percentage charges the whole ecosystem for what is largely a graveyard. Where a registry entry links a GitHub repository, the table below uses that repository's last push; otherwise it falls back to the date the registry entry itself was last updated. "Within the window" means the last 180 days.
+A dead endpoint that returns 200 is indistinguishable from a maintained one that chose not to migrate — unless you can date it. The registry skews heavily toward servers listed once and never touched again, so an aggregate percentage charges the whole ecosystem for what is largely a graveyard. Where a registry entry links a GitHub repository, the table below uses that repository's last push; otherwise it falls back to the date the registry entry itself was last updated. The line is the day the revision shipped, 2026-07-28, rather than a rolling window: a 180-day window was the first attempt and it separated nothing, because 98.6% of the rows carrying a real commit date fell inside it. Both the registry and this revision are too young for that question to mean anything.
 
 | | modern | dual | legacy | unknown | All |
 | --- | --- | --- | --- | --- | --- |
-| last activity within the window | 85 | 541 | 5886 | 3112 | 9624 |
-| last activity older than the window | 0 | 2 | 79 | 95 | 176 |
+| last activity on or after 2026-07-28 | 56 | 467 | 3950 | 1718 | 6191 |
+| last activity before 2026-07-28 | 29 | 76 | 2015 | 1489 | 3609 |
 | repository archived, disabled or gone | 11 | 51 | 576 | 452 | 1090 |
 | no date could be obtained | 0 | 0 | 0 | 0 | 0 |
 
