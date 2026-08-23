@@ -1,0 +1,26 @@
+{
+  "name": "mcp-migration-check",
+  "description": "The MCP 2026-07-28 migration skill, distributed from the repository that maintains it.",
+  "owner": {
+    "name": "AlpayC",
+    "url": "https://github.com/AlpayC"
+  },
+  "plugins": [
+    {
+      "name": "mcp-migration",
+      "source": "./skill",
+      "skills": "./",
+      "strict": false,
+      "description": "Diagnose and carry out the migration of an MCP server to the 2026-07-28 specification. Runs a deterministic rule engine over the code, then walks the remediation per finding: stateless transport, OAuth 2.1, the deprecated capabilities, and the SDK v2 rename.",
+      "author": {
+        "name": "AlpayC",
+        "url": "https://github.com/AlpayC"
+      },
+      "homepage": "https://mcp-migration-check.alpaycelik.workers.dev",
+      "repository": "https://github.com/AlpayC/mcp-migration-check",
+      "license": "MIT",
+      "category": "development",
+      "keywords": ["mcp", "model-context-protocol", "migration", "readiness", "linter"]
+    }
+  ]
+}

@@ -110,9 +110,19 @@ you mean; a stale `A` is worse than no badge.
 
 ### Skill
 
-Download **[`mcp-migration.skill`](https://github.com/AlpayC/mcp-migration-check/releases/latest)**
-from the latest release and install it in Claude, then ask it to migrate a
-server. Or build it yourself:
+In Claude Code, install it from this repository:
+
+```
+/plugin marketplace add AlpayC/mcp-migration-check
+/plugin install mcp-migration@mcp-migration-check
+```
+
+Then ask it to migrate a server. `/plugin marketplace update mcp-migration-check`
+picks up later changes — the skill is served from the repository rather than
+copied out of it, so it cannot go stale against the rules it ships.
+
+Or download **[`mcp-migration.skill`](https://github.com/AlpayC/mcp-migration-check/releases/latest)**
+from the latest release and install that. Or build it yourself:
 
 ```bash
 npm install
@@ -213,6 +223,7 @@ the overview page. They are now verified subpage URLs.
 ## Architecture
 
 ```
+.claude-plugin           marketplace manifest — the skill, served from this repo
 packages/core            pure, deterministic engine (rules · probe · scan · SSRF guard)
 packages/core/test       node:test suite over the engine — no network, no disk
 packages/cli             the npm package: nothing but the bundled engine
