@@ -49,10 +49,14 @@ jobs:
 
       # The published version is the git tag, not whatever is sitting in
       # package.json. One source of truth, and no way to ship v0.2.0 as 0.1.0.
+      #
+      # --allow-same-version because the committed placeholder will sometimes
+      # already equal the tag — on the very first release it does. Without it
+      # `npm version` exits "Version not changed" and takes the publish with it.
       - name: Take the version from the tag
         env:
           TAG: ${{ github.event.inputs.tag || github.ref_name }}
-        run: npm version --no-git-tag-version "${TAG#v}"
+        run: npm version --no-git-tag-version --allow-same-version "${TAG#v}"
         working-directory: packages/cli
 
       # The package is one generated file plus a README. If that file is
