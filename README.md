@@ -12,12 +12,12 @@
 > Paste an MCP endpoint, get a graded report. Nothing to install, nothing stored.
 
 **[State of MCP migration — 2026-08-23](./reports/ecosystem-2026-08-23.md)** —
-13,350 unique remote endpoints from the official registry probed; 10,812
-returned enough protocol or authentication signal to grade. ⚠️ **That snapshot
-is superseded**: it was produced by a probe that only ever spoke as a legacy
-client, so it counted backwards compatibility as drift. See
-[the correction](./reports/ecosystem-2026-08-23.md#correction) — a re-run on
-the dual-era probe is pending.
+13,380 unique remote endpoints from the official registry probed; 10,890
+returned enough protocol or authentication signal to grade. **60.1% serve the
+legacy protocol only.** A further 5.5% are dual-era — current *and* still
+answering the old handshake, which the revision permits and this report does
+not count against them. An earlier version of this snapshot could not tell
+those two apart; see [the postmortem](#mcp001-told-servers-to-break-their-own-users).
 
 [![The web demo grading a live MCP endpoint: a C, one critical finding for the legacy initialize handshake, with the fix and a link to the spec section it derives from](./docs/screenshot.png)](https://mcp-migration-check.alpaycelik.workers.dev)
 
@@ -292,7 +292,7 @@ scripts/ecosystem-report.mjs registry-wide readiness snapshot
 ```
 
 ```bash
-npm test              # node --test via tsx; 109 assertions, no network
+npm test              # node --test via tsx; 110 assertions, no network
 npm run typecheck
 npm run build:bundles # regenerate both copies of the engine; CI fails if stale
 ```
