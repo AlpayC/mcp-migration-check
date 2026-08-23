@@ -203,6 +203,14 @@ async function checkOAuthMetadata(
         method: "GET",
         signal: controller.signal,
       });
+      // Release the connection before doing anything else. Only the status
+      // matters here, but an HTTP client does not consider a request finished
+      // until its body is read or cancelled — undici keeps the socket checked
+      // out, and the next candidate is same-origin by construction, so it
+      // queues behind a response nobody is going to read. Across one endpoint
+      // that is invisible; across thousands it leaks sockets until requests
+      // stop settling at all.
+      await res.body?.cancel().catch(() => {});
       if (res.ok) return true;
     } catch {
       // Try the next candidate; a failure here is not itself a finding.

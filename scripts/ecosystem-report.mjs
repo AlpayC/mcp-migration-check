@@ -37,8 +37,9 @@
  *   --timeout <ms>     Per-probe timeout (default 8000)
  *   --out <dir>        Output directory (default reports/)
  *   --name-servers     Include a per-server table in the Markdown
+ *   --fresh            Ignore today's checkpoint and probe everything again
  */
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, rm, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import {
   evaluate,
@@ -64,6 +65,7 @@ const CONCURRENCY = Number(flag("concurrency", "6"));
 const TIMEOUT_MS = Number(flag("timeout", "8000"));
 const OUT_DIR = resolve(process.cwd(), flag("out", "reports"));
 const NAME_SERVERS = has("name-servers");
+const FRESH = has("fresh");
 
 /**
  * Page through the registry and keep the servers that expose an HTTP endpoint.
@@ -165,8 +167,30 @@ function classify(probe) {
   return { outcome: "graded", findings, grade: gradeFrom(findings) };
 }
 
+/**
+ * A probe worst case is one initialize request plus up to three metadata
+ * candidates, each with its own timeout — so anything past that many is not
+ * slow, it is stuck.
+ *
+ * This exists because a run of 13,346 endpoints once reached 13,345 and stopped
+ * there: one probe never settled, `Promise.all` waited for it forever, and
+ * seventy minutes of results died in memory. Whatever the cause of the day, a
+ * report that walks the whole public registry cannot make every result depend
+ * on every endpoint behaving. The abandoned request keeps running — there is no
+ * way to reach in and cancel it — but it no longer holds the run hostage.
+ */
+const HARD_DEADLINE_MS = TIMEOUT_MS * 6;
+
+function withDeadline(promise, ms, onTimeout) {
+  let timer;
+  const deadline = new Promise((resolve) => {
+    timer = setTimeout(() => resolve(onTimeout()), ms);
+  });
+  return Promise.race([promise, deadline]).finally(() => clearTimeout(timer));
+}
+
 /** Probe every target, at most CONCURRENCY at a time. */
-async function probeAll(targets) {
+async function probeAll(targets, checkpoint) {
   const results = new Array(targets.length);
   let next = 0;
   let done = 0;
@@ -179,7 +203,14 @@ async function probeAll(targets) {
     if (!guard.ok) return { outcome: "blocked", note: guard.reason };
 
     try {
-      return classify(await probeEndpoint(target.url, { timeoutMs: TIMEOUT_MS }));
+      return await withDeadline(
+        probeEndpoint(target.url, { timeoutMs: TIMEOUT_MS }).then(classify),
+        HARD_DEADLINE_MS,
+        () => ({
+          outcome: "unreachable",
+          note: `probe did not settle within ${HARD_DEADLINE_MS} ms`,
+        }),
+      );
     } catch (err) {
       // probeEndpoint swallows network failures into `reachable: false`;
       // anything thrown past it is a bug or a runtime limit, and losing the
@@ -195,7 +226,12 @@ async function probeAll(targets) {
     for (;;) {
       const i = next++;
       if (i >= targets.length) return;
-      results[i] = { ...targets[i], ...(await one(targets[i])) };
+      const target = targets[i];
+
+      const seen = checkpoint.done.get(target.url);
+      results[i] = seen ?? { ...target, ...(await one(target)) };
+      if (!seen) await checkpoint.record(results[i]);
+
       done++;
       process.stderr.write(`\r  probing: ${done}/${targets.length}…`);
     }
@@ -354,7 +390,57 @@ function renderMarkdown({ probed, summary, entries, localOnly, startedAt }) {
   return out.join("\n");
 }
 
+/**
+ * Append every settled probe to a JSONL file and read it back on the next run.
+ *
+ * Probing the whole registry takes over an hour. Anything that ends the process
+ * before the last endpoint — a hang, a Ctrl-C, a laptop lid — used to throw away
+ * every result, because they only existed in an array. One line per endpoint,
+ * written as it settles, turns a lost run into a resumed one.
+ */
+async function openCheckpoint(day) {
+  await mkdir(OUT_DIR, { recursive: true });
+  const path = resolve(OUT_DIR, `.ecosystem-${day}.progress.jsonl`);
+  const done = new Map();
+
+  if (!FRESH) {
+    try {
+      for (const line of (await readFile(path, "utf8")).split("\n")) {
+        if (!line.trim()) continue;
+        try {
+          const row = JSON.parse(line);
+          if (row?.url) done.set(row.url, row);
+        } catch {
+          // A half-written last line is what an interrupted run leaves behind.
+          // Skipping it costs one endpoint; refusing to start costs the rest.
+        }
+      }
+    } catch {
+      /* no checkpoint yet */
+    }
+  }
+
+  const handle = await open(path, FRESH ? "w" : "a");
+  return {
+    path,
+    done,
+    record: (row) => handle.write(JSON.stringify(row) + "\n"),
+    close: () => handle.close(),
+    discard: async () => {
+      await handle.close();
+      await rm(path, { force: true });
+    },
+  };
+}
+
 const startedAt = new Date().toISOString();
+const day = startedAt.slice(0, 10);
+const checkpoint = await openCheckpoint(day);
+if (checkpoint.done.size > 0) {
+  console.error(`Resuming: ${checkpoint.done.size} endpoint(s) already probed today.`);
+  console.error(`  (--fresh to start over; the file is ${checkpoint.path})`);
+}
+
 console.error("Collecting targets from the MCP registry…");
 const { targets, entries, localOnly } = await collectTargets();
 if (targets.length === 0) {
@@ -363,11 +449,10 @@ if (targets.length === 0) {
 }
 
 console.error(`Probing ${targets.length} endpoints…`);
-const probed = await probeAll(targets);
+const probed = await probeAll(targets, checkpoint);
 const summary = summarize(probed);
 
 await mkdir(OUT_DIR, { recursive: true });
-const day = startedAt.slice(0, 10);
 const jsonPath = resolve(OUT_DIR, `ecosystem-${day}.json`);
 const mdPath = resolve(OUT_DIR, `ecosystem-${day}.md`);
 
@@ -404,3 +489,11 @@ console.error(
 console.error("");
 console.error(`Wrote ${jsonPath}`);
 console.error(`Wrote ${mdPath}`);
+
+// The report is written, so the checkpoint has done its job.
+await checkpoint.discard();
+
+// A probe that blew its deadline is still out there holding a socket, and an
+// open socket keeps the event loop alive — the process would sit here having
+// already written everything it was asked to write.
+process.exit(0);
