@@ -94,16 +94,45 @@ workflow itself was tested.
 ### Publishing to npm
 
 The same tag push also fires `.github/workflows/publish-npm.yml`, which
-publishes `packages/cli` as **`mcp-migration-check`**. Three things are worth
-knowing before the first release:
+publishes `packages/cli` as **`mcp-migration-check`**.
 
-- **One secret is required.** `NPM_TOKEN`, an npm *automation* token with
-  publish rights on the package. Without it the publish step fails and the
-  release still succeeds — the skill artifact and the npm package are
-  independent.
+**There is no npm token in this repository, and there should not be one.** The
+workflow authenticates by
+[trusted publishing](https://docs.npmjs.com/trusted-publishers): it exchanges
+the run's OIDC identity for a short-lived credential, against a publisher
+configured once on the package itself. The alternative aged badly — npm revoked
+classic tokens in December 2025, caps granular write tokens at 90 days, and is
+removing the publish rights of the 2FA-bypass tokens that CI needs. A secret
+that expires quarterly breaks the release on a day nobody is expecting it.
+
+That leaves one chicken-and-egg problem: a trusted publisher is configured in a
+package's settings, and until the first publish there is no package. So the
+first version goes out by hand, once:
+
+```bash
+npm login
+npm ci && npm run build:cli
+cd packages/cli && npm publish --no-provenance
+```
+
+`--no-provenance` because `publishConfig.provenance` is set and npm can only
+generate an attestation from a recognised CI runner; without the flag a local
+publish aborts on exactly that. Every later release comes from the workflow and
+is attested normally.
+
+Then, on npmjs.com → the package → Settings → Trusted Publisher: owner `AlpayC`,
+repository `mcp-migration-check`, workflow `publish-npm.yml`. After that the tag
+push is the whole procedure again.
+
+Three more things worth knowing:
+
 - **The version comes from the tag**, not from `packages/cli/package.json`. The
   workflow runs `npm version --no-git-tag-version` with the tag minus its `v`,
   so `v0.3.0` publishes `0.3.0`. The committed version is only a placeholder.
+- **The workflow upgrades npm before publishing.** Trusted publishing needs npm
+  11.5.1 or later and Node 22 still bundles npm 10; the failure without it is
+  `ENEEDAUTH`, which reads like a missing token and sends you hunting in the
+  wrong place entirely.
 - **`packages/cli` is deliberately not a workspace.** It has no dependencies
   and nothing in the repository imports it; making it one would only add a
   `node_modules` symlink and a chance for `npm ci` to trip over a generated
@@ -112,9 +141,6 @@ knowing before the first release:
 `workflow_dispatch` with `dry-run: true` runs everything up to the publish —
 including packing the tarball and executing the packed binary — without
 touching the registry. Do that first.
-
-Publishes carry [npm provenance](https://docs.npmjs.com/generating-provenance-statements),
-which is why the workflow requests `id-token: write`.
 
 ### The Action's `v1` tag
 
@@ -128,6 +154,10 @@ git tag -f v1 v0.3.0 && git push -f origin v1
 Move it only to a commit whose CI is green — the `action` job exists precisely
 because a composite action's shell only ever runs on a runner, so nothing else
 catches a typo in it. Consumers pinned to `@v1` get the new commit immediately.
+
+This is why both tag-triggered workflows filter on `v[0-9]+.[0-9]+.[0-9]+`
+rather than `v*`. A moving `v1` matches `v*` too, and every move of it would
+otherwise cut a GitHub release and try to publish a version called "1" to npm.
 
 ## Rate limiting
 

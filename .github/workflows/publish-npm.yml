@@ -2,7 +2,10 @@ name: Publish to npm
 
 on:
   push:
-    tags: ["v*"]
+    # Version tags only. `v*` would also match `v1`, the moving pointer the
+    # GitHub Action is consumed through — and moving that tag would then try to
+    # publish a release called "1" to npm.
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
   workflow_dispatch:
     inputs:
       tag:
@@ -15,8 +18,9 @@ on:
 
 permissions:
   contents: read
-  # Required for npm provenance: npm exchanges this for a signed attestation
-  # tying the published tarball to this workflow run and commit.
+  # Two things need this. npm exchanges it for a short-lived credential —
+  # trusted publishing, so there is no long-lived token in this repository at
+  # all — and for the provenance attestation tying the tarball to this run.
   id-token: write
 
 jobs:
@@ -33,6 +37,12 @@ jobs:
           node-version: 22
           cache: npm
           registry-url: https://registry.npmjs.org
+
+      # Trusted publishing needs npm 11.5.1+, and Node 22 still bundles npm 10.
+      # Without this the publish fails with ENEEDAUTH — which reads like a
+      # missing token and sends you looking in exactly the wrong place.
+      - name: npm new enough to speak OIDC
+        run: npm install -g npm@^11
 
       - run: npm ci
 
@@ -73,9 +83,12 @@ jobs:
             || { echo "::error::the packed binary does not run"; exit 1; }
           rm -f mcp-migration-check-*.tgz
 
+      # No NODE_AUTH_TOKEN: authentication is the OIDC exchange above, against
+      # the trusted publisher configured on the package. There is deliberately
+      # no secret to leak, rotate, or find expired at the worst moment — npm
+      # caps write tokens at 90 days and is removing their publish rights
+      # outright. See DEPLOY.md for the one-time setup this depends on.
       - name: Publish
         if: github.event.inputs.dry-run != 'true'
         working-directory: packages/cli
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: npm publish

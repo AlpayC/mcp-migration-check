@@ -2,7 +2,9 @@ name: Release
 
 on:
   push:
-    tags: ["v*"]
+    # Version tags only — `v*` would also catch `v1`, the moving pointer the
+    # GitHub Action is consumed through, and cut a release for every move of it.
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
   workflow_dispatch:
     inputs:
       tag:
