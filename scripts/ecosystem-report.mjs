@@ -38,6 +38,8 @@
  *   --out <dir>        Output directory (default reports/)
  *   --name-servers     Include a per-server table in the Markdown
  *   --fresh            Ignore today's checkpoint and probe everything again
+ *   --from <file>      Re-render the Markdown from an existing JSON report,
+ *                      without touching the registry or any endpoint
  */
 import { mkdir, open, readFile, rm, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
@@ -66,6 +68,7 @@ const TIMEOUT_MS = Number(flag("timeout", "8000"));
 const OUT_DIR = resolve(process.cwd(), flag("out", "reports"));
 const NAME_SERVERS = has("name-servers");
 const FRESH = has("fresh");
+const FROM = flag("from", null);
 
 /**
  * Page through the registry and keep the servers that expose an HTTP endpoint.
@@ -242,6 +245,27 @@ async function probeAll(targets, checkpoint) {
   return results;
 }
 
+/**
+ * Rules a live probe structurally cannot observe, and why.
+ *
+ * Printed as `0.0%` next to rules that were actually measured, these read as
+ * "nobody has this problem". Only rules that genuinely cannot fire belong here:
+ * a rule that is merely rare still gets its real count, because suppressing an
+ * observation that did happen is the same defect in the other direction.
+ */
+const UNOBSERVABLE_LIVE = {
+  MCP007: "reads a package.json, which a probe does not have",
+};
+
+/**
+ * Rules that can fire but are structurally rare, with the reason. Their counts
+ * are real; the note stops a near-zero from being read as an all-clear.
+ */
+const RARE_LIVE = {
+  MCP004: "`sampling` is a client capability — a server advertises it only if it is also a client",
+  MCP005: "`roots` is a client capability, same as above",
+};
+
 const OUTCOME_LABEL = {
   graded: "graded",
   silent: "answered, but showed no MCP behaviour",
@@ -272,7 +296,15 @@ function summarize(probed) {
 
 const pct = (n, total) => (total === 0 ? "—" : `${((n / total) * 100).toFixed(1)}%`);
 
-function renderMarkdown({ probed, summary, entries, localOnly, startedAt }) {
+function renderMarkdown({
+  probed,
+  summary,
+  entries,
+  localOnly,
+  startedAt,
+  timeoutMs = TIMEOUT_MS,
+  concurrency = CONCURRENCY,
+}) {
   const { graded, grades, ruleCounts, outcomes, withCritical } = summary;
   const day = startedAt.slice(0, 10);
   const out = [];
@@ -304,6 +336,17 @@ function renderMarkdown({ probed, summary, entries, localOnly, startedAt }) {
   out.push(`| …addressable over HTTP (unique endpoints) | ${probed.length} |`);
   out.push(`| …stdio/local only, not probeable | ${localOnly} |`);
   out.push("");
+  // The two rows do not sum to the first, and the difference is real rather than
+  // an error — so say so before a reader subtracts and concludes otherwise.
+  const duplicates = entries - localOnly - probed.length;
+  if (duplicates > 0) {
+    out.push(
+      `The last two rows are ${duplicates} short of the first: that many registry ` +
+        "entries pointed at an endpoint another entry already claimed, and probing " +
+        "one server twice would count its grade twice.",
+    );
+    out.push("");
+  }
   out.push("Of the endpoints probed:");
   out.push("");
   out.push("| Outcome | Endpoints | Share |");
@@ -327,15 +370,44 @@ function renderMarkdown({ probed, summary, entries, localOnly, startedAt }) {
     out.push(`| ${letter} | ${grades[letter]} | ${pct(grades[letter], graded.length)} |`);
   }
   out.push("");
+  out.push(
+    "Two properties of this scale are worth stating rather than leaving to be " +
+      "discovered:",
+  );
+  out.push("");
+  out.push(
+    "- **B is unreachable over a live probe.** B needs exactly one warning and no " +
+      "critical. Every warning a probe can see comes from a capability the server " +
+      "advertised, which it can only do by answering `initialize` — and that is " +
+      "itself scored as a critical finding. So the combination cannot occur.",
+  );
+  out.push(
+    "- **A means no finding, not a clean bill of health.** A registered endpoint " +
+      "that answers an unauthenticated probe with a 401 and serves correct RFC 9728 " +
+      "metadata scores A having shown no capabilities at all. This snapshot cannot " +
+      "say how much of the A column is that case.",
+  );
+  out.push("");
   out.push("## What is firing");
   out.push("");
   out.push("| Rule | Severity | Signal | Servers | Share |");
   out.push("| --- | --- | --- | --- | --- |");
   for (const rule of rules) {
     const n = ruleCounts[rule.id] ?? 0;
+    const blind = UNOBSERVABLE_LIVE[rule.id];
     out.push(
-      `| [${rule.id}](${rule.specRef}) | ${rule.severity} | ${rule.title} | ${n} | ${pct(n, graded.length)} |`,
+      `| [${rule.id}](${rule.specRef}) | ${rule.severity} | ${rule.title} | ` +
+        `${blind ? "—" : n} | ${blind ? "not observable" : pct(n, graded.length)} |`,
     );
+  }
+  out.push("");
+  for (const [id, why] of Object.entries(UNOBSERVABLE_LIVE)) {
+    out.push(`- **${id} is not measured here.** It ${why}.`);
+  }
+  for (const [id, why] of Object.entries(RARE_LIVE)) {
+    // Real count, with the reason it is near zero. A rule that is rare because
+    // of what it looks for is not evidence that the ecosystem is healthy.
+    out.push(`- **${id} at ${ruleCounts[id] ?? 0}** is structural, not reassuring: ${why}.`);
   }
   out.push("");
 
@@ -359,7 +431,7 @@ function renderMarkdown({ probed, summary, entries, localOnly, startedAt }) {
       "[mcp-migration-check](https://github.com/AlpayC/mcp-migration-check): a " +
       "single legacy `initialize` request plus a best-effort look for OAuth " +
       `protected-resource metadata. Nothing destructive, no authentication ` +
-      `attempted, ${TIMEOUT_MS} ms timeout, ${CONCURRENCY} at a time.`,
+      `attempted, ${timeoutMs} ms timeout, ${concurrency} at a time.`,
   );
   out.push("");
   out.push(
@@ -436,6 +508,39 @@ async function openCheckpoint(day) {
   };
 }
 
+/**
+ * Re-render an existing report.
+ *
+ * The Markdown is the publishable artifact and the JSON is the evidence, so a
+ * wording fix — or a corrected rule — should not cost another hour of probing
+ * somebody else's servers. Everything the renderer needs is already in the JSON.
+ */
+if (FROM) {
+  const saved = JSON.parse(await readFile(resolve(process.cwd(), FROM), "utf8"));
+  const probedSaved = saved.results ?? [];
+  if (probedSaved.length === 0) {
+    console.error(`${FROM} carries no per-target results — nothing to re-render.`);
+    process.exit(2);
+  }
+  const md = renderMarkdown({
+    probed: probedSaved,
+    summary: summarize(probedSaved),
+    entries: saved.registryEntries,
+    localOnly: saved.localOnly,
+    startedAt: saved.startedAt,
+    // Older reports predate these fields. Fall back to the flags in effect now,
+    // which is right when the defaults have not moved and visible when they have.
+    timeoutMs: saved.timeoutMs ?? TIMEOUT_MS,
+    concurrency: saved.concurrency ?? CONCURRENCY,
+  });
+  await mkdir(OUT_DIR, { recursive: true });
+  const out = resolve(OUT_DIR, `ecosystem-${saved.startedAt.slice(0, 10)}.md`);
+  await writeFile(out, md);
+  console.error(`Re-rendered ${probedSaved.length} results from ${FROM}`);
+  console.error(`Wrote ${out}`);
+  process.exit(0);
+}
+
 const startedAt = new Date().toISOString();
 const day = startedAt.slice(0, 10);
 const checkpoint = await openCheckpoint(day);
@@ -464,6 +569,8 @@ await writeFile(
   JSON.stringify(
     {
       startedAt,
+      timeoutMs: TIMEOUT_MS,
+      concurrency: CONCURRENCY,
       registryEntries: entries,
       localOnly,
       probed: probed.length,
