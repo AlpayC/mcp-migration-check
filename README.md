@@ -73,6 +73,15 @@ dependency tree — the same bundled engine the skill carries. Exit codes are
 `0` clean, `1` at least one critical finding, `2` inconclusive, so it works as
 a CI gate on its own.
 
+It is an ordinary package on the public registry, so whatever you already use
+reaches it — only the run-it-once command differs:
+
+```bash
+pnpm dlx mcp-migration-check https://example.com/mcp
+yarn dlx mcp-migration-check https://example.com/mcp
+bunx mcp-migration-check https://example.com/mcp
+```
+
 ### GitHub Action
 
 ```yaml

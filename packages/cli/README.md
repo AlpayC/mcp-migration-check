@@ -7,6 +7,9 @@ npx mcp-migration-check https://example.com/mcp   # probe a live endpoint
 npx mcp-migration-check --source ./my-server      # scan a repository
 ```
 
+Or `pnpm dlx`, `yarn dlx`, `bunx` — no dependencies, nothing to install either
+way.
+
 The [Model Context Protocol](https://modelcontextprotocol.io) revision dated
 **2026-07-28** makes the transport stateless, formalizes OAuth 2.1 for remote
 servers, and deprecates several capabilities. This is a small, **deterministic**
