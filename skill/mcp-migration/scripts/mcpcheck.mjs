@@ -3,7 +3,8 @@
 // packages/core/src/rules.ts
 var SPEC_BASE = "https://modelcontextprotocol.io/specification/2026-07-28";
 var SPEC = {
-  changelog: `${SPEC_BASE}/changelog`,
+  versioning: `${SPEC_BASE}/basic/versioning`,
+  discover: `${SPEC_BASE}/server/discover`,
   transport: `${SPEC_BASE}/basic/transports/streamable-http`,
   logging: `${SPEC_BASE}/server/utilities/logging`,
   sampling: `${SPEC_BASE}/client/sampling`,
@@ -14,12 +15,14 @@ var SPEC = {
   sdk: "https://blog.modelcontextprotocol.io/posts/sdk-betas-2026-07-28/"
 };
 var SPEC_VERIFIED_AT = {
-  [SPEC.changelog]: "2026-08-01",
-  [SPEC.transport]: "2026-08-01",
+  [SPEC.transport]: "2026-08-23",
   [SPEC.logging]: "2026-08-01",
   [SPEC.sampling]: "2026-08-01",
   [SPEC.roots]: "2026-08-01",
   [SPEC.authorization]: "2026-08-01",
+  // Read in full when the dual-era rewrite landed.
+  [SPEC.versioning]: "2026-08-23",
+  [SPEC.discover]: "2026-08-23",
   // Checked against npm the following day, when the rename turned up.
   [SPEC.sdk]: "2026-08-02"
 };
@@ -30,42 +33,52 @@ function firstMatch(ctx, signal) {
 function loc(match) {
   return match ? `${match.file}:${match.line}` : void 0;
 }
+function servesModern(ctx) {
+  if (ctx.live && (ctx.live.era === "modern" || ctx.live.era === "dual")) return true;
+  return (ctx.source?.matches.modernEra?.length ?? 0) > 0;
+}
+function versionsClause(ctx) {
+  const v = ctx.live?.supportedVersions ?? [];
+  return v.length > 0 ? ` It names ${v.join(", ")} as supported.` : "";
+}
 var rules = [
   {
     id: "MCP001",
-    title: "Legacy initialize handshake",
+    title: "Legacy-only: the current revision is not served",
     severity: "critical",
-    specRef: SPEC.changelog,
+    specRef: SPEC.versioning,
     evaluate(ctx) {
-      const live = ctx.live?.respondsToInitialize;
+      if (servesModern(ctx)) return null;
+      const live = ctx.live?.respondsToLegacyInitialize;
       const src = firstMatch(ctx, "initialize");
       if (!live && !src) return null;
+      const negotiated = ctx.live?.legacyProtocolVersion;
       return {
         ruleId: "MCP001",
-        title: "Legacy initialize handshake",
+        title: "Legacy-only: the current revision is not served",
         severity: "critical",
-        detail: live ? "The server responded to the legacy `initialize` handshake. The 2026-07-28 model is stateless and does not use the session-establishing handshake." : "Source references the `initialize` lifecycle, which the stateless model removes.",
-        fix: "Remove the initialize/initialized handshake. Treat each request as self-contained; move any per-session setup into request-scoped context.",
-        specRef: SPEC.changelog,
+        detail: live ? `The server answered the legacy \`initialize\` handshake${negotiated ? ` (negotiating ${negotiated})` : ""} and showed no sign of the modern surface: \`server/discover\` did not answer, and a request carrying per-request \`_meta\` was not served as one. A modern client cannot talk to it at all.` : "Source implements the `initialize` lifecycle and nothing that handles the modern per-request `_meta` envelope or `server/discover`. As written, this server serves legacy clients only.",
+        fix: "Add the modern path \u2014 do not remove the legacy one. Serve requests carrying `io.modelcontextprotocol/protocolVersion` in `_meta` statelessly, and implement `server/discover`. A dual-era server MAY keep answering `initialize` on the same endpoint; that is how v1 clients keep working, and deleting the handshake would break every one of them.",
+        specRef: SPEC.versioning,
         location: live ? "live endpoint" : loc(src)
       };
     }
   },
   {
     id: "MCP002",
-    title: "Session-id dependence",
+    title: "Session state on the modern surface",
     severity: "critical",
     specRef: SPEC.transport,
     evaluate(ctx) {
-      const live = ctx.live?.sessionIdHeaderPresent;
-      const src = firstMatch(ctx, "sessionId");
+      const live = ctx.live?.sessionIdOnModernRequest;
+      const src = servesModern(ctx) ? void 0 : firstMatch(ctx, "sessionId");
       if (!live && !src) return null;
       return {
         ruleId: "MCP002",
-        title: "Session-id dependence",
+        title: "Session state on the modern surface",
         severity: "critical",
-        detail: live ? "The server issued an `Mcp-Session-Id` header. Sessions are gone in the stateless model; sticky state tied to a session id will break behind a load balancer." : "Source relies on `Mcp-Session-Id` / session state. This is the classic hazard: in-memory state that silently breaks once requests no longer hit one instance.",
-        fix: "Remove session-id routing. Servers that need cross-call state mint explicit handles and take them back as ordinary tool arguments; otherwise make handlers fully stateless.",
+        detail: live ? "The server issued an `Mcp-Session-Id` header in response to a modern, `_meta`-carrying request. Protocol-level sessions are gone in this revision; a server serving it must ignore the header and neither mint nor echo session IDs." : "Source relies on `Mcp-Session-Id` / session state and shows no modern per-request handling beside it. This is the classic hazard: in-memory state that silently breaks once requests no longer hit one instance.",
+        fix: "Keep session handling scoped to the legacy path if you serve one, and make the modern path stateless. Servers that need cross-call state mint explicit handles and take them back as ordinary tool arguments.",
         specRef: SPEC.transport,
         location: live ? "live endpoint" : loc(src)
       };
@@ -76,60 +89,42 @@ var rules = [
     title: "Deprecated logging capability",
     severity: "warning",
     specRef: SPEC.logging,
-    evaluate(ctx) {
-      const live = ctx.live?.advertisedCapabilities.includes("logging");
-      const src = firstMatch(ctx, "logging");
-      if (!live && !src) return null;
-      return {
-        ruleId: "MCP003",
-        title: "Deprecated logging capability",
-        severity: "warning",
-        detail: live ? "The server advertises the deprecated `logging` capability." : "Source registers the deprecated `logging` capability.",
-        fix: "Remove the logging capability and its handlers. Log to stderr on stdio transports, or use OpenTelemetry for observability.",
-        specRef: SPEC.logging,
-        location: live ? "live endpoint" : loc(src)
-      };
-    }
+    evaluate: capabilityRule({
+      id: "MCP003",
+      capability: "logging",
+      title: "Deprecated logging capability",
+      specRef: SPEC.logging,
+      fix: "Remove the logging capability and its handlers. Log to stderr on stdio transports, or use OpenTelemetry for observability.",
+      sourceDetail: "Source registers the deprecated `logging` capability."
+    })
   },
   {
     id: "MCP004",
     title: "Deprecated sampling capability",
     severity: "warning",
     specRef: SPEC.sampling,
-    evaluate(ctx) {
-      const live = ctx.live?.advertisedCapabilities.includes("sampling");
-      const src = firstMatch(ctx, "sampling");
-      if (!live && !src) return null;
-      return {
-        ruleId: "MCP004",
-        title: "Deprecated sampling capability",
-        severity: "warning",
-        detail: live ? "The server advertises/uses the deprecated `sampling` capability." : "Source references the deprecated `sampling` capability (createMessage).",
-        fix: "Remove reliance on server-initiated sampling. Integrate directly with an LLM provider API, or return the raw material and let the client decide whether a model call is needed.",
-        specRef: SPEC.sampling,
-        location: live ? "live endpoint" : loc(src)
-      };
-    }
+    evaluate: capabilityRule({
+      id: "MCP004",
+      capability: "sampling",
+      title: "Deprecated sampling capability",
+      specRef: SPEC.sampling,
+      fix: "Remove reliance on server-initiated sampling. Integrate directly with an LLM provider API, or return the raw material and let the client decide whether a model call is needed.",
+      sourceDetail: "Source references the deprecated `sampling` capability (createMessage)."
+    })
   },
   {
     id: "MCP005",
     title: "Deprecated roots capability",
     severity: "warning",
     specRef: SPEC.roots,
-    evaluate(ctx) {
-      const live = ctx.live?.advertisedCapabilities.includes("roots");
-      const src = firstMatch(ctx, "roots");
-      if (!live && !src) return null;
-      return {
-        ruleId: "MCP005",
-        title: "Deprecated roots capability",
-        severity: "warning",
-        detail: live ? "The server advertises/uses the deprecated `roots` capability." : "Source references the deprecated `roots` capability.",
-        fix: "Remove the roots capability. Pass directories or files via tool parameters, resource URIs, or server configuration instead.",
-        specRef: SPEC.roots,
-        location: live ? "live endpoint" : loc(src)
-      };
-    }
+    evaluate: capabilityRule({
+      id: "MCP005",
+      capability: "roots",
+      title: "Deprecated roots capability",
+      specRef: SPEC.roots,
+      fix: "Remove the roots capability. Pass directories or files via tool parameters, resource URIs, or server configuration instead.",
+      sourceDetail: "Source references the deprecated `roots` capability."
+    })
   },
   {
     id: "MCP006",
@@ -171,14 +166,96 @@ var rules = [
         location: "package.json"
       };
     }
+  },
+  {
+    id: "MCP008",
+    title: "`server/discover` not implemented",
+    severity: "warning",
+    specRef: SPEC.discover,
+    evaluate(ctx) {
+      const live = ctx.live;
+      if (!live || live.discoverImplemented !== false) return null;
+      if (live.era !== "modern" && live.era !== "dual") return null;
+      return {
+        ruleId: "MCP008",
+        title: "`server/discover` not implemented",
+        severity: "warning",
+        detail: "The server served a modern request but answered `server/discover` with no result. The revision says servers **MUST** implement it, and it is the probe clients use to pick a protocol version before sending anything else.",
+        fix: "Implement `server/discover`, returning `supportedVersions`, `capabilities` and `_meta['io.modelcontextprotocol/serverInfo']`.",
+        specRef: SPEC.discover,
+        location: "live endpoint"
+      };
+    }
+  },
+  // ---- Observations (MCP1xx) ----------------------------------------------
+  // These carry `info` severity, which costs no points. They exist because a
+  // report that cannot distinguish "still accepts legacy" from "only accepts
+  // legacy" reports the first as if it were the second.
+  {
+    id: "MCP101",
+    title: "Dual-era: still accepts the legacy handshake",
+    severity: "info",
+    specRef: SPEC.versioning,
+    evaluate(ctx) {
+      if (ctx.live?.era !== "dual") return null;
+      return {
+        ruleId: "MCP101",
+        title: "Dual-era: still accepts the legacy handshake",
+        severity: "info",
+        detail: `The server serves the current revision${versionsClause(
+          ctx
+        )} and also answers the legacy \`initialize\` handshake${ctx.live.legacyProtocolVersion ? ` (negotiating ${ctx.live.legacyProtocolVersion})` : ""}. That is a supported configuration, not drift: a dual-era server picks its semantics from how each client opens.`,
+        fix: "Nothing to do. Keep the legacy path while clients in the wild still send `initialize`, and retire it on your own schedule.",
+        specRef: SPEC.versioning,
+        location: "live endpoint"
+      };
+    }
+  },
+  {
+    id: "MCP102",
+    title: "Session ids issued to legacy clients only",
+    severity: "info",
+    specRef: SPEC.transport,
+    evaluate(ctx) {
+      const live = ctx.live;
+      if (!live?.sessionIdOnLegacyHandshake) return null;
+      if (live.sessionIdOnModernRequest) return null;
+      if (live.era !== "dual") return null;
+      return {
+        ruleId: "MCP102",
+        title: "Session ids issued to legacy clients only",
+        severity: "info",
+        detail: "`Mcp-Session-Id` came back from the legacy handshake but not from a modern request. That is the legacy revision working as specified; the modern surface stayed stateless.",
+        fix: "Nothing to do, as long as no modern-path behaviour depends on that session. Retire it with the legacy path.",
+        specRef: SPEC.transport,
+        location: "live endpoint"
+      };
+    }
   }
 ];
+function capabilityRule(spec) {
+  return (ctx) => {
+    const live = ctx.live?.advertisedCapabilities.includes(spec.capability);
+    const src = firstMatch(ctx, spec.capability);
+    if (!live && !src) return null;
+    const legacyOnly = live === true && ctx.live?.capabilitiesEra === "legacy" && ctx.live.era === "dual";
+    return {
+      ruleId: spec.id,
+      title: spec.title,
+      severity: legacyOnly ? "info" : "warning",
+      detail: live ? legacyOnly ? `The server advertises the deprecated \`${spec.capability}\` capability in its legacy handshake only. Deprecated features stay functional through the deprecation window, so this is what a dual-era server offering v1 clients what they expect looks like.` : `The server advertises the deprecated \`${spec.capability}\` capability.` : spec.sourceDetail,
+      fix: legacyOnly ? `Nothing urgent. Drop \`${spec.capability}\` when you retire the legacy path \u2014 new implementations should not adopt it.` : spec.fix,
+      specRef: spec.specRef,
+      location: live ? "live endpoint" : loc(src)
+    };
+  };
+}
 
 // packages/core/src/engine.ts
 var PENALTY = {
   critical: 30,
   warning: 15,
-  info: 5
+  info: 0
 };
 function gradeFrom(findings) {
   const deduction = findings.reduce((sum, f) => sum + PENALTY[f.severity], 0);
@@ -192,73 +269,188 @@ function evaluate(ctx) {
 }
 
 // packages/core/src/probe.ts
-var INITIALIZE_BODY = {
-  jsonrpc: "2.0",
-  id: 1,
-  method: "initialize",
-  params: {
-    protocolVersion: "2025-11-25",
-    capabilities: {},
-    clientInfo: { name: "mcpcheck", version: "0.1.0" }
-  }
-};
+var CURRENT_PROTOCOL_VERSION = "2026-07-28";
+var LEGACY_PROTOCOL_VERSION = "2025-11-25";
+var CLIENT_INFO = { name: "mcpcheck", version: "0.2.0" };
+var MODERN_ERROR_MIN = -32099;
+var MODERN_ERROR_MAX = -32020;
 var DEFAULT_MAX_BODY_BYTES = 256 * 1024;
 async function probeEndpoint(url, opts = {}) {
   const doFetch = opts.fetchImpl ?? fetch;
   const timeoutMs = opts.timeoutMs ?? 8e3;
-  const base = {
+  const maxBodyBytes = opts.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;
+  const ctx = {
     reachable: false,
-    sessionIdHeaderPresent: false,
-    respondsToInitialize: false,
+    era: "unknown",
+    supportedVersions: [],
+    discoverImplemented: null,
+    modernRequestsServed: false,
+    respondsToLegacyInitialize: false,
+    legacyProtocolVersion: null,
+    sessionIdOnModernRequest: false,
+    sessionIdOnLegacyHandshake: false,
     advertisedCapabilities: [],
+    capabilitiesEra: null,
     authRequired: false,
     oauthResourceMetadata: false
   };
   let wwwAuthenticate = null;
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const res = await doFetch(url, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        accept: "application/json, text/event-stream"
-      },
-      body: JSON.stringify(INITIALIZE_BODY),
-      signal: controller.signal
-    });
-    base.reachable = true;
-    base.sessionIdHeaderPresent = res.headers.has("mcp-session-id");
-    wwwAuthenticate = res.headers.get("www-authenticate");
-    if (res.status === 401 || wwwAuthenticate !== null) {
-      base.authRequired = true;
+  let modernEra = false;
+  const send = (body, headers) => request(doFetch, url, body, headers, timeoutMs, maxBodyBytes);
+  const discover = await send(
+    modernBody("discover-1", "server/discover"),
+    modernHeaders("server/discover")
+  );
+  if (discover.error) {
+    ctx.rawError = discover.error;
+  } else {
+    ctx.reachable = true;
+    ctx.sessionIdOnModernRequest = discover.sessionId;
+    wwwAuthenticate = discover.wwwAuthenticate;
+    if (discover.status === 401 || wwwAuthenticate !== null) ctx.authRequired = true;
+    const result = discover.payload?.result;
+    const code = numericErrorCode(discover.payload);
+    if (result && typeof result === "object") {
+      modernEra = true;
+      ctx.discoverImplemented = true;
+      ctx.modernRequestsServed = true;
+      ctx.supportedVersions = stringList(result.supportedVersions);
+      if (result.capabilities && typeof result.capabilities === "object") {
+        ctx.advertisedCapabilities = Object.keys(result.capabilities);
+        ctx.capabilitiesEra = "modern";
+      }
+    } else if (code !== null && code >= MODERN_ERROR_MIN && code <= MODERN_ERROR_MAX) {
+      modernEra = true;
+      ctx.discoverImplemented = true;
+      ctx.supportedVersions = stringList(discover.payload?.error?.data?.supported);
+    } else if (!ctx.authRequired) {
+      ctx.discoverImplemented = false;
     }
-    const text = await readCapped(
-      res,
-      opts.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES
-    ).catch(() => "");
-    const payload = parseMaybeSse(text);
-    if (payload && payload.result) {
-      base.respondsToInitialize = true;
-      const caps = payload.result.capabilities;
-      if (caps && typeof caps === "object") {
-        base.advertisedCapabilities = Object.keys(caps);
+  }
+  if (ctx.reachable && !modernEra && !ctx.authRequired) {
+    const list = await send(
+      modernBody("list-1", "tools/list"),
+      modernHeaders("tools/list")
+    );
+    if (!list.error) {
+      if (list.sessionId) ctx.sessionIdOnModernRequest = true;
+      const result = list.payload?.result;
+      const code = numericErrorCode(list.payload);
+      if (result && typeof result === "object" && typeof result.resultType === "string") {
+        modernEra = true;
+        ctx.modernRequestsServed = true;
+      } else if (code !== null && code >= MODERN_ERROR_MIN && code <= MODERN_ERROR_MAX) {
+        modernEra = true;
+        ctx.supportedVersions = stringList(list.payload?.error?.data?.supported);
       }
     }
-  } catch (err) {
-    base.rawError = err instanceof Error ? err.message : String(err);
-  } finally {
-    clearTimeout(timer);
   }
-  if (base.reachable) {
-    base.oauthResourceMetadata = await checkOAuthMetadata(
+  if (ctx.reachable && !ctx.authRequired && !opts.skipLegacyProbe) {
+    const init = await send(legacyInitializeBody(), {
+      "content-type": "application/json",
+      accept: "application/json, text/event-stream"
+    });
+    if (!init.error) {
+      const result = init.payload?.result;
+      if (result && typeof result === "object") {
+        ctx.respondsToLegacyInitialize = true;
+        ctx.sessionIdOnLegacyHandshake = init.sessionId;
+        if (typeof result.protocolVersion === "string") {
+          ctx.legacyProtocolVersion = result.protocolVersion;
+        }
+        if (ctx.capabilitiesEra === null && result.capabilities && typeof result.capabilities === "object") {
+          ctx.advertisedCapabilities = Object.keys(result.capabilities);
+          ctx.capabilitiesEra = "legacy";
+        }
+      }
+    }
+  }
+  ctx.era = deriveEra(modernEra, ctx.respondsToLegacyInitialize);
+  if (ctx.reachable) {
+    ctx.oauthResourceMetadata = await checkOAuthMetadata(
       url,
       wwwAuthenticate,
       doFetch,
       timeoutMs
     ).catch(() => false);
   }
-  return base;
+  return ctx;
+}
+function deriveEra(modern, legacy) {
+  if (modern && legacy) return "dual";
+  if (modern) return "modern";
+  if (legacy) return "legacy";
+  return "unknown";
+}
+function modernBody(id, method) {
+  return {
+    jsonrpc: "2.0",
+    id,
+    method,
+    params: {
+      _meta: {
+        "io.modelcontextprotocol/protocolVersion": CURRENT_PROTOCOL_VERSION,
+        "io.modelcontextprotocol/clientInfo": CLIENT_INFO,
+        "io.modelcontextprotocol/clientCapabilities": {}
+      }
+    }
+  };
+}
+function modernHeaders(method) {
+  return {
+    "content-type": "application/json",
+    accept: "application/json, text/event-stream",
+    "mcp-protocol-version": CURRENT_PROTOCOL_VERSION,
+    "mcp-method": method
+  };
+}
+function legacyInitializeBody() {
+  return {
+    jsonrpc: "2.0",
+    id: 1,
+    method: "initialize",
+    params: {
+      protocolVersion: LEGACY_PROTOCOL_VERSION,
+      capabilities: {},
+      clientInfo: CLIENT_INFO
+    }
+  };
+}
+async function request(doFetch, url, body, headers, timeoutMs, maxBodyBytes) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await doFetch(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+      signal: controller.signal
+    });
+    const text = await readCapped(res, maxBodyBytes).catch(() => "");
+    return {
+      status: res.status,
+      sessionId: res.headers.has("mcp-session-id"),
+      wwwAuthenticate: res.headers.get("www-authenticate"),
+      payload: parseMaybeSse(text)
+    };
+  } catch (err) {
+    return {
+      status: 0,
+      sessionId: false,
+      wwwAuthenticate: null,
+      payload: null,
+      error: err instanceof Error ? err.message : String(err)
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+function numericErrorCode(payload) {
+  const code = payload?.error?.code;
+  return typeof code === "number" && Number.isFinite(code) ? code : null;
+}
+function stringList(value) {
+  return Array.isArray(value) ? value.filter((v) => typeof v === "string") : [];
 }
 async function readCapped(res, limit) {
   if (!res.body) return res.text();
@@ -355,7 +547,21 @@ var SIGNAL_PATTERNS = {
   sessionId: /[Mm]cp-[Ss]ession-[Ii]d|mcpSessionId|\bsessionId\b/,
   logging: /["']logging["']|LoggingLevel|\blogging\b\s*:\s*\{/,
   sampling: /["']sampling["']|createMessage|SamplingMessage|\bsampling\b\s*:\s*\{/,
-  roots: /["']roots["']|ListRootsRequest|RootsCapability|\broots\b\s*:\s*\{/
+  roots: /["']roots["']|ListRootsRequest|RootsCapability|\broots\b\s*:\s*\{/,
+  /**
+   * Evidence that the repository speaks the current revision.
+   *
+   * This is the signal that keeps a legacy match from being read as drift. A
+   * server can support both eras, and the ones that do are usually the
+   * well-maintained ones — without something to weigh against `initialize`,
+   * every dual-era codebase grades as if it had never migrated.
+   *
+   * Deliberately narrow: the `io.modelcontextprotocol/` prefix and
+   * `server/discover` only exist in `2026-07-28`, so a match is hard evidence.
+   * A dependency on the v2 SDK packages counts too — that line has no legacy
+   * mode to be confused with.
+   */
+  modernEra: /io\.modelcontextprotocol\/(protocolVersion|clientCapabilities|clientInfo|serverInfo)|["']server\/discover["']|@modelcontextprotocol\/(server|client|core)\b/
 };
 async function scanSource(dir, opts = {}) {
   const maxFiles = opts.maxFiles ?? 5e3;
@@ -382,17 +588,29 @@ async function scanSource(dir, opts = {}) {
       }
     }
   }
-  const sdkVersion = await readSdkVersion(dir);
-  return { matches, sdkVersion, filesScanned };
+  const pkg = await readPackageJson(dir);
+  for (const name of pkg.modernPackages) {
+    matches.modernEra.push({ file: "package.json", line: 0, text: name });
+  }
+  return { matches, sdkVersion: pkg.sdkVersion, filesScanned };
 }
-async function readSdkVersion(dir) {
+var MODERN_PACKAGES = [
+  "@modelcontextprotocol/server",
+  "@modelcontextprotocol/client",
+  "@modelcontextprotocol/core"
+];
+async function readPackageJson(dir) {
   try {
     const raw = await fs.readFile(path.join(dir, "package.json"), "utf8");
     const pkg = JSON.parse(raw);
-    const dep = pkg.dependencies?.["@modelcontextprotocol/sdk"] ?? pkg.devDependencies?.["@modelcontextprotocol/sdk"];
-    return typeof dep === "string" ? dep : null;
+    const deps = { ...pkg.devDependencies, ...pkg.dependencies };
+    const dep = deps["@modelcontextprotocol/sdk"];
+    return {
+      sdkVersion: typeof dep === "string" ? dep : null,
+      modernPackages: MODERN_PACKAGES.filter((name) => typeof deps[name] === "string")
+    };
   } catch {
-    return null;
+    return { sdkVersion: null, modernPackages: [] };
   }
 }
 async function readIfSmallEnough(file, maxBytes) {
@@ -492,6 +710,18 @@ function isPrivateIpv6(ip) {
 }
 
 // packages/core/src/index.ts
+function describeEra(live) {
+  switch (live.era) {
+    case "dual":
+      return "Serves the current revision and still answers the legacy `initialize` handshake (dual-era).";
+    case "modern":
+      return "Serves the current revision. The legacy `initialize` handshake was not answered.";
+    case "legacy":
+      return "Answers the legacy `initialize` handshake only \u2014 no modern surface responded.";
+    default:
+      return live.authRequired ? "Authentication required, so neither protocol era could be probed." : "Nothing answered in a way that identified a protocol era.";
+  }
+}
 async function checkLive(url, opts = {}) {
   const enforce = opts.enforceSsrfGuard ?? true;
   if (enforce) {
@@ -526,7 +756,8 @@ async function checkLive(url, opts = {}) {
     mode: "live",
     findings,
     grade: gradeFrom(findings),
-    checkedAt: (/* @__PURE__ */ new Date()).toISOString()
+    checkedAt: (/* @__PURE__ */ new Date()).toISOString(),
+    note: describeEra(live)
   };
 }
 async function checkSource(dir, opts = {}) {

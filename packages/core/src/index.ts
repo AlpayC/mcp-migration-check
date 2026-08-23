@@ -8,8 +8,28 @@ export * from "./types";
 export { evaluate, gradeFrom } from "./engine";
 export { rules, rulesVerifiedAt, SPEC_VERIFIED_AT } from "./rules";
 export { isSafePublicUrl } from "./ssrf";
-export { probeEndpoint } from "./probe";
+export {
+  probeEndpoint,
+  CURRENT_PROTOCOL_VERSION,
+  LEGACY_PROTOCOL_VERSION,
+} from "./probe";
 export { scanSource } from "./scan";
+
+/** One line describing which protocol era answered, for the report header. */
+export function describeEra(live: import("./types").ProbeContext): string {
+  switch (live.era) {
+    case "dual":
+      return "Serves the current revision and still answers the legacy `initialize` handshake (dual-era).";
+    case "modern":
+      return "Serves the current revision. The legacy `initialize` handshake was not answered.";
+    case "legacy":
+      return "Answers the legacy `initialize` handshake only — no modern surface responded.";
+    default:
+      return live.authRequired
+        ? "Authentication required, so neither protocol era could be probed."
+        : "Nothing answered in a way that identified a protocol era.";
+  }
+}
 
 /**
  * Check a live MCP endpoint. Enforces the SSRF guard by default so this is
@@ -59,6 +79,7 @@ export async function checkLive(
     findings,
     grade: gradeFrom(findings),
     checkedAt: new Date().toISOString(),
+    note: describeEra(live),
   };
 }
 

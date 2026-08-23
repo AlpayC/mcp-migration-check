@@ -1,8 +1,33 @@
 # State of MCP migration — 2026-08-23
 
+> ## Correction
+>
+> **The headline below is wrong and this snapshot is superseded.** It was
+> produced by a probe that opened every connection as a *legacy* client — one
+> `initialize` request carrying `protocolVersion: 2025-11-25` — and then
+> reported the answer as a critical finding. Two consequences:
+>
+> - **MCP001's 70.1% is a compatibility count, not a compliance one.** The
+>   `2026-07-28` revision says a server that wants to serve both kinds of client
+>   [**MAY** implement both behaviours](https://modelcontextprotocol.io/specification/2026-07-28/basic/versioning).
+>   A maintained, fully current server that keeps answering `initialize` for the
+>   v1 clients still in the field was graded as if it had never migrated.
+> - **The probe never asked the modern question.** It sent no
+>   `server/discover`, no per-request `_meta`, no `MCP-Protocol-Version` header
+>   — so a server that answers the current revision and *declines* the legacy
+>   handshake could not be distinguished from one that does the opposite.
+>
+> The checker now opens as a modern client first and splits "still accepts
+> legacy" (MCP101, an observation worth zero points) from "only accepts legacy"
+> (MCP001, critical). A re-run on the corrected probe is pending; until it
+> lands, read the numbers below as *"answered a v1 handshake"* and nothing more.
+>
+> — 2026-08-23, after maintainer feedback. Details in the
+> [README postmortem](../README.md#mcp001-told-servers-to-break-their-own-users).
+
 The MCP revision dated **2026-07-28** removed protocol-level sessions, formalized OAuth 2.1 and deprecated several capabilities. This is a snapshot of how many public servers have followed it.
 
-**75.8% of the 10812 registered endpoints with enough protocol or authentication signal to grade still show at least one critical breaking-change signal.**
+~~**75.8% of the 10812 registered endpoints with enough protocol or authentication signal to grade still show at least one critical breaking-change signal.**~~ — see the correction above. This number counts legacy-handshake *support*, most of which is deliberate backwards compatibility.
 
 ## Sample
 
@@ -52,7 +77,7 @@ Each endpoint got one live probe from [mcp-migration-check](https://github.com/A
 - **The registry is not the ecosystem.** It lists servers that registered, and only the ones publishing a remote endpoint appear above at all.
 - **A live probe sees six of the seven rules.** MCP007 reads a `package.json`, which a probe does not have.
 - **Seven rules are not the whole revision.** A server can pass every rule here and still be broken — `server/discover`, `resultType`, `subscriptions/listen` and the new required headers are not covered.
-- **MCP001 is a direct legacy-handshake count.** It fires whenever an endpoint returns an `initialize` result, because that is the signal it detects. Its share measures legacy-handshake compatibility within the graded sample; it is not an independent conformance test.
+- **MCP001 is a direct legacy-handshake count.** It fires whenever an endpoint returns an `initialize` result, because that is the signal it detects. Its share measures legacy-handshake compatibility within the graded sample; it is not an independent conformance test. **This framing was too weak** — the rule was scored `critical` and its fix text told maintainers to remove the handshake, which the correction above retracts.
 - **Authentication is evidence, not proof of MCP behaviour.** A registered endpoint that returns `401` or `WWW-Authenticate` is graded so its OAuth posture can be inspected, but an unauthenticated probe sees little else. A generic protected endpoint can look the same from the outside.
 
 Rules last verified against the spec: 2026-08-01. Probed 2026-08-23T06:49:38.474Z.

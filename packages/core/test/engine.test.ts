@@ -15,17 +15,24 @@ function finding(severity: Severity, ruleId = "MCPTEST"): Finding {
   };
 }
 
-/** Penalties are 30 / 15 / 5; letters are A>=90, B>=75, C>=60, D>=40, else F. */
+/**
+ * Penalties are 30 / 15 / 0; letters are A>=90, B>=75, C>=60, D>=40, else F.
+ *
+ * `info` is deliberately free. Info findings are observations — a dual-era
+ * server still answering the legacy handshake is the motivating case — and a
+ * grade that slips because a server kept faith with old clients is the exact
+ * misreading this checker had to correct.
+ */
 const CASES: Array<{ findings: Severity[]; score: number; letter: string }> = [
   { findings: [], score: 100, letter: "A" },
-  { findings: ["info", "info"], score: 90, letter: "A" }, // lower edge of A
+  { findings: ["info", "info", "info"], score: 100, letter: "A" },
   { findings: ["warning"], score: 85, letter: "B" },
-  { findings: ["info", "info", "info", "info", "info"], score: 75, letter: "B" }, // lower edge of B
+  { findings: ["warning", "warning"], score: 70, letter: "C" },
   { findings: ["critical"], score: 70, letter: "C" },
-  { findings: ["critical", "info", "info"], score: 60, letter: "C" }, // lower edge of C
+  { findings: ["critical", "info", "info"], score: 70, letter: "C" },
   { findings: ["critical", "warning"], score: 55, letter: "D" },
   { findings: ["critical", "critical"], score: 40, letter: "D" }, // lower edge of D
-  { findings: ["critical", "critical", "info"], score: 35, letter: "F" },
+  { findings: ["critical", "critical", "warning"], score: 25, letter: "F" },
   { findings: ["critical", "critical", "critical"], score: 10, letter: "F" },
 ];
 
@@ -50,9 +57,16 @@ test("findings come back sorted with criticals first", () => {
   const findings = evaluate({
     live: {
       reachable: true,
-      sessionIdHeaderPresent: true,
-      respondsToInitialize: false,
+      era: "dual",
+      supportedVersions: ["2026-07-28"],
+      discoverImplemented: true,
+      modernRequestsServed: true,
+      respondsToLegacyInitialize: true,
+      legacyProtocolVersion: "2025-11-25",
+      sessionIdOnModernRequest: true,
+      sessionIdOnLegacyHandshake: false,
       advertisedCapabilities: ["logging"],
+      capabilitiesEra: "modern",
       authRequired: false,
       oauthResourceMetadata: false,
     },

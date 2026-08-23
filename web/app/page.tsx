@@ -100,13 +100,15 @@ const EXAMPLES: Array<{ label: string; url: string; auth: "open" | "oauth" }> = 
 
 /** What the checker looks for — shown as a ticker under the hero. */
 const RULES = [
-  { id: "MCP001", label: "Legacy initialize handshake" },
-  { id: "MCP002", label: "Session-id dependence" },
+  { id: "MCP001", label: "Legacy-only: no modern surface" },
+  { id: "MCP002", label: "Session id on a modern request" },
   { id: "MCP003", label: "Deprecated logging capability" },
   { id: "MCP004", label: "Deprecated sampling capability" },
   { id: "MCP005", label: "Deprecated roots capability" },
   { id: "MCP006", label: "Missing OAuth 2.1 posture" },
   { id: "MCP007", label: "SDK still on the v1 line" },
+  { id: "MCP008", label: "No server/discover" },
+  { id: "MCP101", label: "Dual-era (not a defect)" },
 ];
 
 export default function Home() {

@@ -3,13 +3,15 @@
 Jump to the rules your scan reported. Each section describes what the checker
 saw, how to tell a real hazard from noise, and the shape of the fix.
 
-- [MCP001 — Legacy initialize handshake](#mcp001--legacy-initialize-handshake)
-- [MCP002 — Session-id dependence](#mcp002--session-id-dependence)
+- [MCP001 — Legacy-only: the current revision is not served](#mcp001--legacy-only-the-current-revision-is-not-served)
+- [MCP002 — Session state on the modern surface](#mcp002--session-state-on-the-modern-surface)
 - [MCP003 — Deprecated logging capability](#mcp003--deprecated-logging-capability)
 - [MCP004 — Deprecated sampling capability](#mcp004--deprecated-sampling-capability)
 - [MCP005 — Deprecated roots capability](#mcp005--deprecated-roots-capability)
 - [MCP006 — Missing OAuth 2.1 resource-server posture](#mcp006--missing-oauth-21-resource-server-posture)
 - [MCP007 — TypeScript SDK still on the v1 line](#mcp007--typescript-sdk-still-on-the-v1-line)
+- [MCP008 — `server/discover` not implemented](#mcp008--serverdiscover-not-implemented)
+- [MCP101 / MCP102 — compatibility observations](#mcp101--mcp102--compatibility-observations)
 
 Verify exact signatures and header names against the
 [canonical spec](https://modelcontextprotocol.io/specification/2026-07-28) and
@@ -17,7 +19,7 @@ its [changelog](https://modelcontextprotocol.io/specification/2026-07-28/changel
 This file describes the shape of each change; the spec is the authority on its
 details.
 
-**These seven rules are not the whole revision.** `server/discover` is now
+**These rules are not the whole revision.** `server/discover` is now
 mandatory, every result needs a `resultType`, the GET stream and
 `resources/subscribe` give way to `subscriptions/listen`, `ping` and
 `logging/setLevel` are removed, SSE resumability is gone, and the `Mcp-Method` /
@@ -26,46 +28,91 @@ through the changelog before you call a migration complete.
 
 ---
 
-## MCP001 — Legacy initialize handshake
+## MCP001 — Legacy-only: the current revision is not served
 
 **Severity:** critical
 
 **What triggered it.** Live: the endpoint answered a legacy `initialize`
-request. Source: the text `initialize` appears somewhere in the code.
+request **and** nothing modern answered — `server/discover` returned no result
+and a request carrying per-request `_meta` was not served as one. Source: the
+code implements the `initialize` lifecycle and contains no handling of the
+modern `_meta` envelope, no `server/discover`, and no dependency on the v2 SDK
+packages.
+
+**What does *not* trigger it: still answering `initialize`.** This is the
+important half. The revision explicitly allows a server to serve both eras:
+
+> A server that wishes to support both legacy clients (which expect an
+> `initialize` handshake) and modern clients (which use per-request metadata)
+> **MAY** implement both behaviors.
+> — [Versioning: Backward Compatibility](https://modelcontextprotocol.io/specification/2026-07-28/basic/versioning)
+
+A dual-era server picks its semantics from how each request opens: modern
+`_meta` is served statelessly, an `initialize` request selects legacy
+semantics. Keeping the old door open for clients still in the field is a
+deliberate, supported choice. It is reported as MCP101 — an observation worth
+zero points — not as a defect.
 
 **Telling real from noise.** The source signal is weak on its own — the word
 turns up in comments, in unrelated init functions, and in any code that *talks
 to* an MCP server rather than implementing one. Look at whether the file
-registers a request handler for the `initialize` method. If it does not, this is
-noise.
+registers a request handler for the `initialize` method. If it does not, this
+is noise.
 
-The live signal is strong: if the server answered the handshake, it implements
-it.
+The live signal proves an absence, which is the weaker claim: a modern surface
+sitting behind a WAF, a path-based gateway, or a filter that rejects unfamiliar
+methods will look missing when it is not. Reproduce by hand before acting:
 
-**The fix.** Remove the initialize/initialized lifecycle. Anything that used to
-happen once per session at handshake time now has to happen either at process
-start (if it is genuinely global, like loading config) or per request (if it
-depends on who is asking).
+```bash
+curl -sS https://your-server/mcp   -H 'content-type: application/json'   -H 'accept: application/json, text/event-stream'   -H 'MCP-Protocol-Version: 2026-07-28'   -H 'Mcp-Method: server/discover'   -d '{"jsonrpc":"2.0","id":1,"method":"server/discover","params":{"_meta":{
+        "io.modelcontextprotocol/protocolVersion":"2026-07-28",
+        "io.modelcontextprotocol/clientInfo":{"name":"curl","version":"1"},
+        "io.modelcontextprotocol/clientCapabilities":{}}}}'
+```
+
+A `DiscoverResult` back means the finding is a false positive.
+
+**The fix — add the modern path, do not remove the legacy one.** Deleting the
+handshake buys no compliance and breaks every v1 client still pointed at the
+server. What has to exist alongside it:
+
+- Requests carrying `io.modelcontextprotocol/protocolVersion` in `_meta` served
+  statelessly, with `MCP-Protocol-Version` / `Mcp-Method` header validation.
+- `server/discover`, returning `supportedVersions`, `capabilities` and
+  `_meta['io.modelcontextprotocol/serverInfo']`.
+- `resultType` on every result.
+
+Anything that used to happen once per session at handshake time now has to
+happen, on the modern path, either at process start (if it is genuinely global,
+like loading config) or per request (if it depends on who is asking).
 
 The question worth asking for each piece of handshake logic: *does this depend
 on the caller?* Global setup moves to module scope. Caller-dependent setup moves
 into the request path and must be cheap enough to run every time — if it is not,
 that is a caching problem with an explicit key, not a reason to keep a session.
 
+**Retiring the legacy path is a product decision, not a spec deadline.** Decide
+it on the clients you actually serve; the revision sets no date.
+
 **Watch for.** Capability negotiation that used to happen during the handshake.
-If the server changed its behaviour based on what the client advertised, that
-branch has nowhere left to live and the behaviour needs to be decided some other
-way — usually by making it explicit in the tool input.
+On the modern path the server no longer negotiates — clients declare
+capabilities per request in `_meta`, so a branch that switched behaviour on what
+the client advertised at handshake time needs to read them from there, or be
+made explicit in the tool input.
 
 ---
 
-## MCP002 — Session-id dependence
+## MCP002 — Session state on the modern surface
 
 **Severity:** critical
 
 **What triggered it.** Live: the server sent an `Mcp-Session-Id` response
-header. Source: the code mentions `Mcp-Session-Id`, `mcpSessionId`, or a bare
-`sessionId`.
+header **in reply to a modern, `_meta`-carrying request**. The revision is
+explicit that a server serving it must "ignore it, and do not mint or echo
+session IDs". A session id issued by the *legacy* handshake is how the legacy
+revision works and is reported as MCP102, not here. Source: the code mentions
+`Mcp-Session-Id`, `mcpSessionId`, or a bare `sessionId`, and shows no modern
+per-request handling beside it.
 
 **Telling real from noise.** A bare `sessionId` match is often an unrelated
 web-session variable. What matters is whether **server state is keyed by
@@ -255,3 +302,58 @@ mismatch between things that appear identical. Check the lockfile, not just
 for other languages — but they moved too, and differently: Python and C# to 2.x
 majors, Go to a 1.x minor. Check the actual package rather than assuming the
 TypeScript story applies.
+
+---
+
+## MCP008 — `server/discover` not implemented
+
+**Severity:** warning
+
+**What triggered it.** The server served a modern request but answered
+`server/discover` with no result. The revision states that servers **MUST**
+implement it, and it is the probe clients use to pick a protocol version — and
+on stdio, the only way a dual-era client can tell the two eras apart.
+
+**The fix.** Implement the method. It takes no parameters beyond the standard
+`_meta` and returns:
+
+```jsonc
+{
+  "resultType": "complete",
+  "supportedVersions": ["2026-07-28"],
+  "capabilities": { "tools": {}, "resources": {} },
+  "_meta": {
+    "io.modelcontextprotocol/serverInfo": { "name": "…", "version": "…" }
+  },
+  "ttlMs": 3600000,
+  "cacheScope": "public"
+}
+```
+
+List every version you actually serve. A dual-era server names only its modern
+versions here — legacy clients never call this method.
+
+---
+
+## MCP101 / MCP102 — compatibility observations
+
+**Severity:** info — worth **zero** points. These are not defects.
+
+**MCP101** fires when a server serves the current revision *and* still answers
+the legacy `initialize` handshake. **MCP102** fires when session ids come back
+from that handshake but not from a modern request.
+
+Both describe a **dual-era** server, which the revision explicitly permits: it
+selects its behaviour from how each request opens, serving `_meta`-carrying
+requests statelessly and `initialize` requests under legacy semantics, and
+**MAY** serve both eras concurrently on the same endpoint.
+
+**The fix.** None. Keep the legacy path while clients in the wild still send
+`initialize`, and retire it on your own schedule — the revision sets no
+deadline. Anything that tells you to delete the handshake for compliance is
+wrong, and this checker used to be one of those things.
+
+The one thing worth checking: that no modern-path behaviour reads state
+established by a legacy session. The two paths must not share mutable
+per-session state, or the stateless one inherits the failure mode the revision
+removed.

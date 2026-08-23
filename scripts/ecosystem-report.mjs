@@ -146,29 +146,31 @@ async function fetchJson(url, attempt = 1) {
  * `graded` is the only outcome that enters the statistics. The rest are the
  * ways an endpoint can decline to be evidence: refused before we dialled,
  * never answered, or answered with something that shows no sign of being an
- * MCP server — no initialize result, no auth challenge, no session header, no
- * capabilities. The last one is the dangerous case, because it scores a clean
- * A if you let it.
+ * MCP server — neither protocol era identified, no auth challenge, no session
+ * header, no capabilities. The last one is the dangerous case, because it
+ * scores a clean A if you let it.
  */
 function classify(probe) {
   if (!probe.reachable) {
     return { outcome: "unreachable", note: probe.rawError ?? "no response" };
   }
   const spokeMcp =
-    probe.respondsToInitialize ||
+    probe.era !== "unknown" ||
     probe.authRequired ||
-    probe.sessionIdHeaderPresent ||
+    probe.sessionIdOnModernRequest ||
+    probe.sessionIdOnLegacyHandshake ||
     probe.advertisedCapabilities.length > 0;
   if (!spokeMcp) {
     return { outcome: "silent", note: "answered, but showed no MCP behaviour" };
   }
 
   const findings = evaluate({ live: probe });
-  return { outcome: "graded", findings, grade: gradeFrom(findings) };
+  return { outcome: "graded", era: probe.era, findings, grade: gradeFrom(findings) };
 }
 
 /**
- * A probe worst case is one initialize request plus up to three metadata
+ * A probe worst case is three POSTs (modern `server/discover`, a modern
+ * `tools/list` fallback, the legacy `initialize`) plus up to three metadata
  * candidates, each with its own timeout — so anything past that many is not
  * slow, it is stuck.
  *
@@ -179,7 +181,7 @@ function classify(probe) {
  * on every endpoint behaving. The abandoned request keeps running — there is no
  * way to reach in and cancel it — but it no longer holds the run hostage.
  */
-const HARD_DEADLINE_MS = TIMEOUT_MS * 6;
+const HARD_DEADLINE_MS = TIMEOUT_MS * 8;
 
 function withDeadline(promise, ms, onTimeout) {
   let timer;
@@ -249,11 +251,21 @@ const OUTCOME_LABEL = {
   blocked: "blocked by the SSRF guard",
 };
 
+const ERA_LABEL = {
+  modern: "serves 2026-07-28, no legacy handshake",
+  dual: "dual-era: current **and** backwards compatible",
+  legacy: "legacy only: no modern surface answered",
+  unknown: "answered, but neither era could be confirmed",
+};
+
 function summarize(probed) {
   const graded = probed.filter((p) => p.outcome === "graded");
 
   const grades = { A: 0, B: 0, C: 0, D: 0, F: 0 };
   for (const p of graded) grades[p.grade.letter]++;
+
+  const eras = Object.fromEntries(Object.keys(ERA_LABEL).map((k) => [k, 0]));
+  for (const p of graded) eras[p.era ?? "unknown"]++;
 
   const ruleCounts = Object.fromEntries(rules.map((r) => [r.id, 0]));
   for (const p of graded) {
@@ -267,13 +279,13 @@ function summarize(probed) {
     p.findings.some((f) => f.severity === "critical"),
   ).length;
 
-  return { graded, grades, ruleCounts, outcomes, withCritical };
+  return { graded, grades, eras, ruleCounts, outcomes, withCritical };
 }
 
 const pct = (n, total) => (total === 0 ? "—" : `${((n / total) * 100).toFixed(1)}%`);
 
 function renderMarkdown({ probed, summary, entries, localOnly, startedAt }) {
-  const { graded, grades, ruleCounts, outcomes, withCritical } = summary;
+  const { graded, grades, eras, ruleCounts, outcomes, withCritical } = summary;
   const day = startedAt.slice(0, 10);
   const out = [];
 
@@ -291,9 +303,12 @@ function renderMarkdown({ probed, summary, entries, localOnly, startedAt }) {
           "nothing to grade. That is a fact about the run, not about the " +
           "ecosystem — check the outcome table below before reading anything " +
           "into it."
-      : `**${pct(withCritical, graded.length)} of the ${graded.length} registered ` +
-          "endpoints with enough protocol or authentication signal to grade still " +
-          "show at least one critical breaking-change signal.**",
+      : `**${pct(eras.legacy, graded.length)} of the ${graded.length} graded ` +
+          "endpoints serve the legacy protocol only** — they answer the removed " +
+          "`initialize` handshake and no modern surface responded. A further " +
+          `${pct(eras.dual, graded.length)} are dual-era: they serve 2026-07-28 ` +
+          "*and* keep answering the old handshake, which the revision explicitly " +
+          "permits and this report does not count against them.",
   );
   out.push("");
   out.push("## Sample");
@@ -317,6 +332,30 @@ function renderMarkdown({ probed, summary, entries, localOnly, startedAt }) {
       "neither MCP protocol behaviour nor an authentication challenge told us " +
       "nothing, and counting it as clean is how a snapshot like this ends up " +
       "claiming the opposite of the truth.",
+  );
+  out.push("");
+  out.push("## Which protocol era each server serves");
+  out.push("");
+  out.push(
+    "This is the split that matters, and the reason an earlier version of this " +
+      "report overstated the problem. Accepting the legacy handshake is a " +
+      "compatibility choice, not a compliance failure: the revision says a " +
+      "server that wants to serve both kinds of client **MAY** implement both " +
+      "behaviours, and plenty of maintained servers do exactly that because v1 " +
+      "clients are still out there. Only the third row has actually been left " +
+      "behind.",
+  );
+  out.push("");
+  out.push("| Era | Servers | Share |");
+  out.push("| --- | --- | --- |");
+  for (const [key, label] of Object.entries(ERA_LABEL)) {
+    out.push(`| ${label} | ${eras[key]} | ${pct(eras[key], graded.length)} |`);
+  }
+  out.push("");
+  out.push(
+    `For reference: ${withCritical} of ${graded.length} graded endpoints ` +
+      `(${pct(withCritical, graded.length)}) carry at least one critical finding, ` +
+      "counting the OAuth posture rule alongside the era rules.",
   );
   out.push("");
   out.push("## Grades");
@@ -356,8 +395,12 @@ function renderMarkdown({ probed, summary, entries, localOnly, startedAt }) {
   out.push("");
   out.push(
     "Each endpoint got one live probe from " +
-      "[mcp-migration-check](https://github.com/AlpayC/mcp-migration-check): a " +
-      "single legacy `initialize` request plus a best-effort look for OAuth " +
+      "[mcp-migration-check](https://github.com/AlpayC/mcp-migration-check). The " +
+      "probe opens as a **modern** client — `server/discover` carrying " +
+      "`io.modelcontextprotocol/protocolVersion` in `_meta` and the required " +
+      "`MCP-Protocol-Version` header — falls back to a modern `tools/list` if " +
+      "that is inconclusive, and only then sends a legacy `initialize` to see " +
+      "whether the old door is still open. Plus a best-effort look for OAuth " +
       `protected-resource metadata. Nothing destructive, no authentication ` +
       `attempted, ${TIMEOUT_MS} ms timeout, ${CONCURRENCY} at a time.`,
   );
@@ -376,10 +419,19 @@ function renderMarkdown({ probed, summary, entries, localOnly, startedAt }) {
       "`subscriptions/listen` and the new required headers are not covered.",
   );
   out.push(
-    "- **MCP001 is a direct legacy-handshake count.** It fires whenever an " +
-      "endpoint returns an `initialize` result, because that is the signal it " +
-      "detects. Its share measures legacy-handshake compatibility within the " +
-      "graded sample; it is not an independent conformance test.",
+    "- **Legacy-only is a claim about what answered, not about what exists.** " +
+      "MCP001 fires when the legacy handshake answers and *no* modern signal " +
+      "did. A server that fails the modern probe for an unrelated reason — a " +
+      "WAF eating an unfamiliar method, a gateway that only routes known paths " +
+      "— lands in that row wrongly. The dual-era row cannot be wrong in the " +
+      "same direction: it needs a positive modern answer.",
+  );
+  out.push(
+    "- **`initialize` support is never counted as drift.** An earlier revision " +
+      "of this report did count it, which inflated the headline: it graded " +
+      "current servers as broken for staying compatible with clients still in " +
+      "the field. MCP101 records that compatibility as an observation worth " +
+      "zero points.",
   );
   out.push(
     "- **Authentication is evidence, not proof of MCP behaviour.** A registered " +
@@ -469,6 +521,7 @@ await writeFile(
       probed: probed.length,
       outcomes: summary.outcomes,
       graded: summary.graded.length,
+      eras: summary.eras,
       withCritical: summary.withCritical,
       grades: summary.grades,
       ruleCounts: summary.ruleCounts,
