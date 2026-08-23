@@ -2,6 +2,7 @@
 
 [![CI](https://github.com/AlpayC/mcp-migration-check/actions/workflows/ci.yml/badge.svg)](https://github.com/AlpayC/mcp-migration-check/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/AlpayC/mcp-migration-check?color=37d399&label=skill)](https://github.com/AlpayC/mcp-migration-check/releases/latest)
+[![npm](https://img.shields.io/npm/v/mcp-migration-check?color=37d399)](https://www.npmjs.com/package/mcp-migration-check)
 [![Live demo](https://img.shields.io/badge/demo-live-37d399)](https://mcp-migration-check.alpaycelik.workers.dev)
 [![License: MIT](https://img.shields.io/badge/license-MIT-6d8bff)](./LICENSE)
 
@@ -23,16 +24,19 @@ maintained.
 at a running MCP endpoint (or scans a repo) and reports, with a letter grade and
 per-finding fixes, exactly what breaks. No LLM, no API key, nothing stored.
 
-It ships as two surfaces over one core:
+It ships as four surfaces over one core:
 
-| Surface       | Use it to…                                                    |
-| ------------- | ------------------------------------------------------------- |
-| **Web demo**  | paste a URL, get a graded report — nothing to install          |
-| **Skill**     | hand an agent the diagnosis *and* the migration procedure      |
+| Surface           | Use it to…                                                |
+| ----------------- | --------------------------------------------------------- |
+| **Web demo**      | paste a URL, get a graded report — nothing to install      |
+| **CLI**           | `npx mcp-migration-check <url>` — one command, no install  |
+| **GitHub Action** | keep a server from regressing, with a grade on every PR    |
+| **Skill**         | hand an agent the diagnosis *and* the migration procedure  |
 
-The split is deliberate. The web demo sees a server from the outside and answers
-*"am I broken?"*. The skill sees the code and answers *"fix it"* — which is the
-part that actually takes a week.
+The split is deliberate. The demo and the CLI see a server from the outside and
+answer *"am I broken?"*. The Action asks that question again on every commit.
+The skill sees the code and answers *"fix it"* — which is the part that actually
+takes a week.
 
 ---
 
@@ -55,6 +59,45 @@ refuses `localhost`, private ranges and the cloud metadata address, and a
 **rate limit** of 20 requests per minute per IP via Cloudflare's Workers
 binding. See [DEPLOY.md](./DEPLOY.md) for why neither lives where you might
 expect.
+
+### CLI
+
+```bash
+npx mcp-migration-check https://example.com/mcp   # probe a live endpoint
+npx mcp-migration-check --source ./my-server      # scan a repository
+npx mcp-migration-check --source . --json         # machine-readable
+```
+
+The published package is one generated file and a README, with an empty
+dependency tree — the same bundled engine the skill carries. Exit codes are
+`0` clean, `1` at least one critical finding, `2` inconclusive, so it works as
+a CI gate on its own.
+
+### GitHub Action
+
+```yaml
+- uses: AlpayC/mcp-migration-check@v1
+  with:
+    source: .          # or: url: https://example.com/mcp
+    fail-on: critical  # critical (default) | warning | never
+```
+
+It writes a graded table to the job summary and exposes `grade`, `score`,
+`critical`, `warnings`, `findings`, `report-path` and `badge-url` as step
+outputs. No `setup-node`, no install: the engine ships pre-bundled in the
+action. An endpoint that cannot be reached never fails the build — an outage is
+not the same claim as an unmigrated server.
+
+**Badges.** The self-updating one is the workflow's own status badge:
+
+```markdown
+[![MCP 2026-07-28](https://github.com/OWNER/REPO/actions/workflows/mcp-check.yml/badge.svg)](https://github.com/OWNER/REPO/actions/workflows/mcp-check.yml)
+```
+
+The `badge-url` output is a shields.io badge carrying the actual letter grade.
+It is a snapshot of the run that produced it, so it only stays true if something
+writes it back — a README commit, or a gist the badge reads from. Say which one
+you mean; a stale `A` is worse than no badge.
 
 ### Skill
 
@@ -161,16 +204,20 @@ the overview page. They are now verified subpage URLs.
 ## Architecture
 
 ```
-packages/core           pure, deterministic engine (rules · probe · scan · SSRF guard)
-packages/core/test      node:test suite over the engine — no network, no disk
-skill/mcp-migration     SKILL.md + bundled engine + per-rule remediation guide
-web                     Next.js demo (App Router) over the same core
-scripts/build-skill.mjs bundles the engine into the skill (esbuild, no deps in output)
+packages/core            pure, deterministic engine (rules · probe · scan · SSRF guard)
+packages/core/test       node:test suite over the engine — no network, no disk
+packages/cli             the npm package: nothing but the bundled engine
+skill/mcp-migration      SKILL.md + bundled engine + per-rule remediation guide
+web                      Next.js demo (App Router) over the same core
+action.yml               composite GitHub Action over the bundled engine
+scripts/bundle-engine.mjs one esbuild config, two generated copies of the engine
+scripts/ecosystem-report.mjs registry-wide readiness snapshot
 ```
 
 ```bash
-npm test        # node --test via tsx; 81 assertions, no network
+npm test              # node --test via tsx; 88 assertions, no network
 npm run typecheck
+npm run build:bundles # regenerate both copies of the engine; CI fails if stale
 ```
 
 The suite leans on the seams the engine already had: rules are pure functions
@@ -178,14 +225,44 @@ over a `RuleContext`, and `probeEndpoint` takes a `fetchImpl`. The SSRF guard
 gets the most coverage — it is a security control on a public handler, so each
 blocked range is paired with the adjacent address that must still pass.
 
-One core, two consumers — the rules live in exactly one place, and the skill's
-copy of the engine is generated, never hand-edited.
+One core, four consumers — the rules live in exactly one place, and the skill's
+and the CLI's copies of the engine are generated, never hand-edited. CI rebuilds
+both and fails if either moved.
 
 ## Tech
 
 TypeScript · Node 22 · npm workspaces · Next.js 16 (App Router, Turbopack) ·
 React 19.2 · Tailwind v4 · Magic UI · Cloudflare Workers via OpenNext.
 No runtime LLM. MIT licensed.
+
+## Ecosystem report
+
+```bash
+npm run report:ecosystem -- --limit 500 --concurrency 6
+```
+
+Pulls the remote endpoints out of the
+[official MCP registry](https://registry.modelcontextprotocol.io), probes each
+one with the same engine, and writes an aggregate snapshot to `reports/`: how
+many endpoints answered, the grade distribution, and how often each rule fires.
+`--name-servers` adds a per-server table.
+
+Two things about it are deliberate.
+
+**The Markdown report counts servers, it does not name them.** A public league
+table of broken servers is a different project with a different ethics, and it
+would poison the well with exactly the maintainers this tool exists to help.
+The JSON alongside it does carry per-target detail, because it is a local file
+rather than a publication — which is why `reports/*.json` is gitignored and the
+Markdown is not.
+
+**Answering is not the same as being migrated.** `probeEndpoint` sets
+`reachable` on any HTTP response, which is right for a checker aimed at one
+endpoint you own. Across a few thousand strangers it is not: a 403 from a WAF, a
+404 from a moved path and a captive proxy all answer with something that is not
+MCP, and scored naively they come back as a clean **A**. A snapshot built on
+that would report the exact opposite of the truth. Those land in an
+`answered, but showed no MCP behaviour` bucket and stay out of the denominator.
 
 ## Contributing
 

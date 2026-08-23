@@ -1,0 +1,95 @@
+name: "MCP migration check"
+description: "Check whether an MCP server survives the 2026-07-28 specification break — grade, findings, fixes."
+author: "AlpayC"
+
+branding:
+  icon: "check-circle"
+  color: "green"
+
+inputs:
+  url:
+    description: "Live MCP endpoint to probe (http/https). Takes precedence over `source`."
+    required: false
+  source:
+    description: "Directory to scan statically. Defaults to the checked-out repository."
+    required: false
+    default: "."
+  fail-on:
+    description: "When to fail the step: `critical` (default), `warning`, or `never`."
+    required: false
+    default: "critical"
+  report-path:
+    description: "Where to write the JSON report."
+    required: false
+    default: "mcp-migration-report.json"
+
+outputs:
+  grade:
+    description: "Letter grade A–F, or empty when the check was inconclusive."
+    value: ${{ steps.check.outputs.grade }}
+  score:
+    description: "Score out of 100, or empty when the check was inconclusive."
+    value: ${{ steps.check.outputs.score }}
+  critical:
+    description: "Number of critical findings."
+    value: ${{ steps.check.outputs.critical }}
+  warnings:
+    description: "Number of warning findings."
+    value: ${{ steps.check.outputs.warnings }}
+  findings:
+    description: "Total number of findings."
+    value: ${{ steps.check.outputs.findings }}
+  inconclusive:
+    description: "`true` when the target could not be inspected at all."
+    value: ${{ steps.check.outputs.inconclusive }}
+  report-path:
+    description: "Path to the JSON report written by this action."
+    value: ${{ steps.check.outputs.report-path }}
+  badge-url:
+    description: "shields.io URL for a badge showing this run's grade."
+    value: ${{ steps.check.outputs.badge-url }}
+  badge-markdown:
+    description: "Ready-to-paste Markdown for the grade badge."
+    value: ${{ steps.check.outputs.badge-markdown }}
+
+runs:
+  using: "composite"
+  steps:
+    # No `npm install`, no setup-node, no network: the engine ships in this
+    # repository as one pre-bundled file, and GITHUB_ACTION_PATH is where the
+    # runner checked it out. A migration checker that itself needs a working
+    # toolchain to install is a checker people skip.
+    - name: Run mcpcheck
+      id: check
+      shell: bash
+      env:
+        MCPCHECK_URL: ${{ inputs.url }}
+        MCPCHECK_SOURCE: ${{ inputs.source }}
+        MCPCHECK_FAIL_ON: ${{ inputs.fail-on }}
+        MCPCHECK_REPORT: ${{ inputs.report-path }}
+      run: |
+        set -euo pipefail
+        engine="$GITHUB_ACTION_PATH/skill/mcp-migration/scripts/mcpcheck.mjs"
+
+        if [ -n "$MCPCHECK_URL" ]; then
+          set +e
+          node "$engine" "$MCPCHECK_URL" --json > "$MCPCHECK_REPORT"
+          code=$?
+          set -e
+        else
+          set +e
+          node "$engine" --source "$MCPCHECK_SOURCE" --json > "$MCPCHECK_REPORT"
+          code=$?
+          set -e
+        fi
+
+        # Exit 2 means the checker refused or failed before producing a report
+        # (bad arguments, unreadable target). An empty file downstream would
+        # surface as a JSON parse error miles from the cause.
+        if [ ! -s "$MCPCHECK_REPORT" ]; then
+          echo "::error::mcpcheck produced no report (exit $code)"
+          exit 1
+        fi
+
+        node "$GITHUB_ACTION_PATH/scripts/action-report.mjs" \
+          "$MCPCHECK_REPORT" --fail-on "$MCPCHECK_FAIL_ON"

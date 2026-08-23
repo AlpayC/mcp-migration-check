@@ -1,0 +1,77 @@
+name: Publish to npm
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to publish"
+        required: true
+      dry-run:
+        description: "Pack and inspect without publishing"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  # Required for npm provenance: npm exchanges this for a signed attestation
+  # tying the published tarball to this workflow run and commit.
+  id-token: write
+
+jobs:
+  publish:
+    name: publish mcp-migration-check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref_name }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          registry-url: https://registry.npmjs.org
+
+      - run: npm ci
+
+      # `npx mcp-migration-check` is the thing strangers run first, so it does
+      # not get published from an unverified tree.
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
+
+      - name: Build the bundled CLI
+        run: npm run build:cli
+
+      # The published version is the git tag, not whatever is sitting in
+      # package.json. One source of truth, and no way to ship v0.2.0 as 0.1.0.
+      - name: Take the version from the tag
+        env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: npm version --no-git-tag-version "${TAG#v}"
+        working-directory: packages/cli
+
+      # The package is one generated file plus a README. If that file is
+      # missing or is not the engine, the publish is worse than useless —
+      # `npx` would hand people a broken command under a name they trust.
+      - name: Verify the tarball
+        working-directory: packages/cli
+        run: |
+          npm pack
+          tar -tzf mcp-migration-check-*.tgz
+          tar -tzf mcp-migration-check-*.tgz | grep -q "package/bin/mcpcheck.mjs" \
+            || { echo "::error::bin/mcpcheck.mjs missing from the tarball"; exit 1; }
+          node bin/mcpcheck.mjs --help | grep -q "MCP 2026-07-28" \
+            || { echo "::error::the packed binary does not run"; exit 1; }
+          rm -f mcp-migration-check-*.tgz
+
+      - name: Publish
+        if: github.event.inputs.dry-run != 'true'
+        working-directory: packages/cli
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish

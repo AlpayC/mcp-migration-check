@@ -1,0 +1,41 @@
+{
+  "name": "mcp-migration-check",
+  "version": "0.1.0",
+  "description": "Deterministic readiness checker for the MCP 2026-07-28 specification break",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "mcp-migration-check": "bin/mcpcheck.mjs",
+    "mcpcheck": "bin/mcpcheck.mjs"
+  },
+  "files": [
+    "bin/mcpcheck.mjs"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "migration",
+    "linter",
+    "readiness",
+    "cli"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AlpayC/mcp-migration-check.git",
+    "directory": "packages/cli"
+  },
+  "homepage": "https://mcp-migration-check.alpaycelik.workers.dev",
+  "bugs": {
+    "url": "https://github.com/AlpayC/mcp-migration-check/issues"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "scripts": {
+    "prepublishOnly": "node ../../scripts/build-cli.mjs"
+  }
+}

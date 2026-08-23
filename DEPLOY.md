@@ -91,6 +91,44 @@ Ubuntu so packing takes the `zip` path rather than the bsdtar one.
 `workflow_dispatch` rebuilds the artifact for an existing tag, which is how the
 workflow itself was tested.
 
+### Publishing to npm
+
+The same tag push also fires `.github/workflows/publish-npm.yml`, which
+publishes `packages/cli` as **`mcp-migration-check`**. Three things are worth
+knowing before the first release:
+
+- **One secret is required.** `NPM_TOKEN`, an npm *automation* token with
+  publish rights on the package. Without it the publish step fails and the
+  release still succeeds — the skill artifact and the npm package are
+  independent.
+- **The version comes from the tag**, not from `packages/cli/package.json`. The
+  workflow runs `npm version --no-git-tag-version` with the tag minus its `v`,
+  so `v0.3.0` publishes `0.3.0`. The committed version is only a placeholder.
+- **`packages/cli` is deliberately not a workspace.** It has no dependencies
+  and nothing in the repository imports it; making it one would only add a
+  `node_modules` symlink and a chance for `npm ci` to trip over a generated
+  `bin/` that has not been built yet.
+
+`workflow_dispatch` with `dry-run: true` runs everything up to the publish —
+including packing the tarball and executing the packed binary — without
+touching the registry. Do that first.
+
+Publishes carry [npm provenance](https://docs.npmjs.com/generating-provenance-statements),
+which is why the workflow requests `id-token: write`.
+
+### The Action's `v1` tag
+
+`action.yml` is consumed as `AlpayC/mcp-migration-check@v1`, and that tag is a
+moving pointer rather than a release:
+
+```bash
+git tag -f v1 v0.3.0 && git push -f origin v1
+```
+
+Move it only to a commit whose CI is green — the `action` job exists precisely
+because a composite action's shell only ever runs on a runner, so nothing else
+catches a typo in it. Consumers pinned to `@v1` get the new commit immediately.
+
 ## Rate limiting
 
 `/api/check` fetches a URL a stranger supplies, so it needs a brake. There are
