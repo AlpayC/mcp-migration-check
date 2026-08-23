@@ -291,8 +291,9 @@ function renderMarkdown({ probed, summary, entries, localOnly, startedAt }) {
           "nothing to grade. That is a fact about the run, not about the " +
           "ecosystem — check the outcome table below before reading anything " +
           "into it."
-      : `**${pct(withCritical, graded.length)} of the ${graded.length} MCP endpoints ` +
-          "that answered still show at least one critical breaking-change signal.**",
+      : `**${pct(withCritical, graded.length)} of the ${graded.length} registered ` +
+          "endpoints with enough protocol or authentication signal to grade still " +
+          "show at least one critical breaking-change signal.**",
   );
   out.push("");
   out.push("## Sample");
@@ -312,10 +313,10 @@ function renderMarkdown({ probed, summary, entries, localOnly, startedAt }) {
   }
   out.push("");
   out.push(
-    "Only the graded row is scored below. An endpoint that answers a probe " +
-      "with a 403, a 404 or a login page is not a migrated server — it is an " +
-      "endpoint that told us nothing, and counting it as clean is how a " +
-      "snapshot like this ends up claiming the opposite of the truth.",
+    "Only the graded row is scored below. An endpoint that answers but exposes " +
+      "neither MCP protocol behaviour nor an authentication challenge told us " +
+      "nothing, and counting it as clean is how a snapshot like this ends up " +
+      "claiming the opposite of the truth.",
   );
   out.push("");
   out.push("## Grades");
@@ -375,14 +376,16 @@ function renderMarkdown({ probed, summary, entries, localOnly, startedAt }) {
       "`subscriptions/listen` and the new required headers are not covered.",
   );
   out.push(
-    "- **MCP001 fires against essentially every server that answers at all**, " +
-      "because answering `initialize` is what it detects. Read the grade " +
-      "distribution with that in mind: it is the reason F is crowded.",
+    "- **MCP001 is a direct legacy-handshake count.** It fires whenever an " +
+      "endpoint returns an `initialize` result, because that is the signal it " +
+      "detects. Its share measures legacy-handshake compatibility within the " +
+      "graded sample; it is not an independent conformance test.",
   );
   out.push(
-    "- **A server behind auth reports less.** An endpoint that 401s on an " +
-      "unauthenticated probe exposes no capabilities to inspect, so it is " +
-      "graded on very little.",
+    "- **Authentication is evidence, not proof of MCP behaviour.** A registered " +
+      "endpoint that returns `401` or `WWW-Authenticate` is graded so its OAuth " +
+      "posture can be inspected, but an unauthenticated probe sees little else. " +
+      "A generic protected endpoint can look the same from the outside.",
   );
   out.push("");
   out.push(`Rules last verified against the spec: ${rulesVerifiedAt}. Probed ${startedAt}.`);
