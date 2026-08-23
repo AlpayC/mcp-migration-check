@@ -38,6 +38,26 @@
  *   --out <dir>        Output directory (default reports/)
  *   --name-servers     Include a per-server table in the Markdown
  *   --fresh            Ignore today's checkpoint and probe everything again
+ *   --no-dates         Skip repository dating (see below)
+ *   --active-window <days>  How recent counts as maintained (default 180)
+ *
+ * DATING, AND WHY THE DENOMINATOR NEEDS IT
+ *
+ * A dead endpoint that still returns 200 is indistinguishable from a
+ * maintained one that chose not to migrate — unless you can date it. The
+ * registry skews heavily toward servers listed once and never touched again,
+ * so a single aggregate percentage silently blames the whole ecosystem for
+ * what is largely a graveyard.
+ *
+ * Two dates are available and they are not equally strong:
+ *
+ * - `repository.url` → GitHub's `pushed_at`, plus `archived`. This is the real
+ *   maintenance signal. It needs the GitHub API, so it needs `GITHUB_TOKEN` to
+ *   cover more than 60 repositories per hour; without one the run dates what
+ *   it can and reports the coverage honestly rather than quietly guessing.
+ * - The registry's own `updatedAt`, which every entry has for free. Weaker: it
+ *   says when someone last published a version, not when the code moved. Used
+ *   only where no repository date could be had, and labelled as such.
  */
 import { mkdir, open, readFile, rm, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
@@ -66,6 +86,17 @@ const TIMEOUT_MS = Number(flag("timeout", "8000"));
 const OUT_DIR = resolve(process.cwd(), flag("out", "reports"));
 const NAME_SERVERS = has("name-servers");
 const FRESH = has("fresh");
+const SKIP_DATES = has("no-dates");
+const ACTIVE_WINDOW_DAYS = Number(flag("active-window", "180"));
+
+/**
+ * The day the revision shipped. A repository whose last commit predates it
+ * cannot have migrated — no judgement implied, it is simply not evidence of a
+ * maintainer declining to move.
+ */
+const SPEC_RELEASED_AT = "2026-07-28";
+
+const GITHUB_TOKEN = process.env.GITHUB_TOKEN ?? process.env.GH_TOKEN ?? null;
 
 /**
  * Page through the registry and keep the servers that expose an HTTP endpoint.
@@ -102,7 +133,17 @@ async function collectTargets() {
         localOnly++;
         continue;
       }
-      targets.push({ name: server.name, title: server.title, url: remote.url });
+      const official = entry._meta?.["io.modelcontextprotocol.registry/official"] ?? {};
+      targets.push({
+        name: server.name,
+        title: server.title,
+        url: remote.url,
+        repository: typeof server.repository?.url === "string" ? server.repository.url : null,
+        repositorySource: server.repository?.source ?? null,
+        // When the registry entry was last published. Every entry has one, and
+        // for a server listed once and forgotten it is the original date.
+        registryUpdatedAt: official.updatedAt ?? official.publishedAt ?? null,
+      });
     }
 
     const nextCursor = page.metadata?.nextCursor ?? null;
@@ -137,6 +178,191 @@ async function fetchJson(url, attempt = 1) {
     if (attempt >= 4) throw new Error(`registry unreachable after ${attempt} tries: ${err.message}`);
     await new Promise((r) => setTimeout(r, 2 ** attempt * 1000));
     return fetchJson(url, attempt + 1);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Repository dating
+// ---------------------------------------------------------------------------
+
+/** `https://github.com/owner/repo(.git)` → `owner/repo`, or null. */
+function githubRepoKey(url) {
+  if (typeof url !== "string") return null;
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return null;
+  }
+  if (!/(^|\.)github\.com$/i.test(parsed.hostname)) return null;
+  const parts = parsed.pathname.replace(/\.git$/i, "").split("/").filter(Boolean);
+  if (parts.length < 2) return null;
+  return `${parts[0]}/${parts[1]}`.toLowerCase();
+}
+
+/**
+ * Ask GitHub when each repository was last pushed to.
+ *
+ * Deduplicated by repository, because one repo commonly publishes several
+ * registry entries. Stops the moment the rate limit is exhausted rather than
+ * spending an hour on 403s — everything not reached stays `undated`, which the
+ * report prints. A dating pass that silently covers a third of the sample and
+ * says nothing is worse than no dating at all.
+ */
+async function collectRepoDates(targets, cache) {
+  const keys = new Set();
+  for (const t of targets) {
+    const key = githubRepoKey(t.repository);
+    if (key && !cache.has(key)) keys.add(key);
+  }
+
+  const stats = { asked: 0, cached: cache.size, rateLimited: false, failed: 0 };
+  if (SKIP_DATES || keys.size === 0) return stats;
+
+  if (!GITHUB_TOKEN) {
+    console.error(
+      `  no GITHUB_TOKEN — GitHub allows 60 requests/hour unauthenticated, and ` +
+        `${keys.size} repositories need dating. Most rows will be undated.`,
+    );
+  }
+
+  const pending = [...keys];
+  let next = 0;
+  const workers = Math.min(GITHUB_TOKEN ? 8 : 2, pending.length);
+
+  async function worker() {
+    for (;;) {
+      if (stats.rateLimited) return;
+      const i = next++;
+      if (i >= pending.length) return;
+      const key = pending[i];
+
+      try {
+        const res = await fetch(`https://api.github.com/repos/${key}`, {
+          headers: {
+            "user-agent": UA,
+            accept: "application/vnd.github+json",
+            ...(GITHUB_TOKEN ? { authorization: `Bearer ${GITHUB_TOKEN}` } : {}),
+          },
+          signal: AbortSignal.timeout(20_000),
+        });
+        stats.asked++;
+
+        if (res.status === 403 || res.status === 429) {
+          if (res.headers.get("x-ratelimit-remaining") === "0") {
+            stats.rateLimited = true;
+            const reset = Number(res.headers.get("x-ratelimit-reset") ?? 0) * 1000;
+            console.error(
+              `\n  GitHub rate limit reached after ${stats.asked} repositories` +
+                (reset ? `; it resets at ${new Date(reset).toISOString()}` : "") +
+                `. The rest stay undated.`,
+            );
+            return;
+          }
+        }
+        if (res.status === 404 || res.status === 451) {
+          // Gone or blocked: that is itself a fact about the server.
+          cache.set(key, { pushedAt: null, archived: false, missing: true });
+          continue;
+        }
+        if (!res.ok) {
+          stats.failed++;
+          continue;
+        }
+
+        const repo = await res.json();
+        cache.set(key, {
+          pushedAt: repo.pushed_at ?? null,
+          archived: Boolean(repo.archived || repo.disabled),
+          missing: false,
+        });
+      } catch {
+        stats.failed++;
+      } finally {
+        process.stderr.write(`\r  dating: ${cache.size}/${keys.size + stats.cached}…`);
+      }
+    }
+  }
+
+  await Promise.all(Array.from({ length: workers }, worker));
+  process.stderr.write(`\r  dating: ${cache.size} repositories dated\n`);
+  return stats;
+}
+
+const DAY_MS = 86_400_000;
+
+/** How long a repository date is reused before it is fetched again. */
+const DATE_CACHE_TTL_DAYS = 7;
+
+/**
+ * Repository dates persist across runs, unlike the probe checkpoint.
+ *
+ * A push date does not change because the report was re-run, and re-asking
+ * GitHub about thirteen thousand repositories to learn the same answer is the
+ * kind of thing that gets a token rate-limited for everyone. Entries carry the
+ * day they were fetched and are refreshed after a week.
+ */
+async function loadDateCache(now) {
+  await mkdir(OUT_DIR, { recursive: true });
+  const path = resolve(OUT_DIR, ".repo-dates.json");
+  const cache = new Map();
+  if (SKIP_DATES) return { path, cache };
+
+  const stale = new Date(now).getTime() - DATE_CACHE_TTL_DAYS * DAY_MS;
+  try {
+    const raw = JSON.parse(await readFile(path, "utf8"));
+    for (const [key, row] of Object.entries(raw)) {
+      if (!row?.fetchedAt || new Date(row.fetchedAt).getTime() < stale) continue;
+      cache.set(key, row);
+    }
+  } catch {
+    /* no cache yet */
+  }
+  return { path, cache };
+}
+
+async function saveDateCache(path, cache, now) {
+  if (SKIP_DATES || cache.size === 0) return;
+  const out = {};
+  for (const [key, row] of cache) out[key] = { ...row, fetchedAt: row.fetchedAt ?? now };
+  await writeFile(path, JSON.stringify(out, null, 2) + "\n");
+}
+
+
+/**
+ * Attach a maintenance verdict to each probed row.
+ *
+ * `active` / `stale` come from the repository push date where one was
+ * obtainable and from the registry entry's own date otherwise, and the row
+ * records which — the two are not the same claim, and a report that blends
+ * them is back to guessing.
+ */
+function attachActivity(probed, cache, now) {
+  const cutoff = new Date(now).getTime() - ACTIVE_WINDOW_DAYS * DAY_MS;
+
+  for (const row of probed) {
+    const key = githubRepoKey(row.repository);
+    const repo = key ? cache.get(key) : undefined;
+
+    let at = null;
+    let source = "none";
+    if (repo?.pushedAt) {
+      at = repo.pushedAt;
+      source = "repository";
+    } else if (row.registryUpdatedAt) {
+      at = row.registryUpdatedAt;
+      source = "registry";
+    }
+
+    row.lastActivityAt = at;
+    row.activitySource = source;
+    row.archived = Boolean(repo?.archived);
+    row.repositoryMissing = Boolean(repo?.missing);
+    row.touchedSinceSpec = at ? at.slice(0, 10) >= SPEC_RELEASED_AT : null;
+
+    if (repo?.archived || repo?.missing) row.activity = "archived";
+    else if (!at) row.activity = "undated";
+    else row.activity = new Date(at).getTime() >= cutoff ? "active" : "stale";
   }
 }
 
@@ -251,6 +477,19 @@ const OUTCOME_LABEL = {
   blocked: "blocked by the SSRF guard",
 };
 
+/**
+ * Deliberately source-neutral wording. A row's date is a repository push where
+ * one was obtainable and the registry entry's own timestamp otherwise, so a
+ * label that says "pushed" would be false for most of the table. The split by
+ * source is printed underneath instead.
+ */
+const ACTIVITY_LABEL = {
+  active: "last activity within the window",
+  stale: "last activity older than the window",
+  archived: "repository archived, disabled or gone",
+  undated: "no date could be obtained",
+};
+
 const ERA_LABEL = {
   modern: "serves 2026-07-28, no legacy handshake",
   dual: "dual-era: current **and** backwards compatible",
@@ -267,6 +506,29 @@ function summarize(probed) {
   const eras = Object.fromEntries(Object.keys(ERA_LABEL).map((k) => [k, 0]));
   for (const p of graded) eras[p.era ?? "unknown"]++;
 
+  // Era against maintenance. This is the cross-tab the aggregate percentage
+  // was hiding: "abandoned" and "maintained but behind" are different problems
+  // and only one of them is anybody's to fix.
+  const byActivity = {};
+  for (const key of Object.keys(ACTIVITY_LABEL)) {
+    byActivity[key] = Object.fromEntries(Object.keys(ERA_LABEL).map((k) => [k, 0]));
+    byActivity[key].total = 0;
+  }
+  for (const p of graded) {
+    const bucket = byActivity[p.activity ?? "undated"];
+    bucket[p.era ?? "unknown"]++;
+    bucket.total++;
+  }
+
+  const dateSources = { repository: 0, registry: 0, none: 0 };
+  for (const p of graded) dateSources[p.activitySource ?? "none"]++;
+
+  // Servers whose repository has not been touched since the revision shipped
+  // cannot have migrated — counting them as "declined to migrate" is the
+  // mistake that inflates a headline.
+  const touchedSinceSpec = graded.filter((p) => p.touchedSinceSpec === true);
+  const legacyAmongTouched = touchedSinceSpec.filter((p) => p.era === "legacy").length;
+
   const ruleCounts = Object.fromEntries(rules.map((r) => [r.id, 0]));
   for (const p of graded) {
     for (const f of p.findings) ruleCounts[f.ruleId] = (ruleCounts[f.ruleId] ?? 0) + 1;
@@ -279,13 +541,35 @@ function summarize(probed) {
     p.findings.some((f) => f.severity === "critical"),
   ).length;
 
-  return { graded, grades, eras, ruleCounts, outcomes, withCritical };
+  return {
+    graded,
+    grades,
+    eras,
+    byActivity,
+    dateSources,
+    touchedSinceSpec: touchedSinceSpec.length,
+    legacyAmongTouched,
+    ruleCounts,
+    outcomes,
+    withCritical,
+  };
 }
 
 const pct = (n, total) => (total === 0 ? "—" : `${((n / total) * 100).toFixed(1)}%`);
 
-function renderMarkdown({ probed, summary, entries, localOnly, startedAt }) {
-  const { graded, grades, eras, ruleCounts, outcomes, withCritical } = summary;
+function renderMarkdown({ probed, summary, entries, localOnly, startedAt, dateStats }) {
+  const {
+    graded,
+    grades,
+    eras,
+    byActivity,
+    dateSources,
+    touchedSinceSpec,
+    legacyAmongTouched,
+    ruleCounts,
+    outcomes,
+    withCritical,
+  } = summary;
   const day = startedAt.slice(0, 10);
   const out = [];
 
@@ -311,6 +595,17 @@ function renderMarkdown({ probed, summary, entries, localOnly, startedAt }) {
           "permits and this report does not count against them.",
   );
   out.push("");
+  if (graded.length > 0 && touchedSinceSpec > 0) {
+    out.push(
+      `**Narrowed to servers that could have migrated** — the ${touchedSinceSpec} ` +
+        `whose repository or registry entry has been touched since ${SPEC_RELEASED_AT} ` +
+        `— ${pct(legacyAmongTouched, touchedSinceSpec)} are still legacy-only. That ` +
+        "is the number worth arguing about. The rest of the sample has not been " +
+        "edited since the revision shipped, so it is not evidence of anyone " +
+        "declining to move.",
+    );
+    out.push("");
+  }
   out.push("## Sample");
   out.push("");
   out.push("| | Count |");
@@ -358,6 +653,47 @@ function renderMarkdown({ probed, summary, entries, localOnly, startedAt }) {
       "counting the OAuth posture rule alongside the era rules.",
   );
   out.push("");
+  out.push("## Maintained, or just still listed?");
+  out.push("");
+  out.push(
+    "A dead endpoint that returns 200 is indistinguishable from a maintained " +
+      "one that chose not to migrate — unless you can date it. The registry " +
+      "skews heavily toward servers listed once and never touched again, so an " +
+      "aggregate percentage charges the whole ecosystem for what is largely a " +
+      "graveyard. Where a registry entry links a GitHub repository, the table " +
+      "below uses that repository's last push; otherwise it falls back to the " +
+      `date the registry entry itself was last updated. "Within the window" ` +
+      `means the last ${ACTIVE_WINDOW_DAYS} days.`,
+  );
+  out.push("");
+  out.push(`| | ${Object.keys(ERA_LABEL).join(" | ")} | All |`);
+  out.push(`| --- | ${Object.keys(ERA_LABEL).map(() => "---").join(" | ")} | --- |`);
+  for (const [key, label] of Object.entries(ACTIVITY_LABEL)) {
+    const row = byActivity[key];
+    const cells = Object.keys(ERA_LABEL).map((era) => `${row[era]}`);
+    out.push(`| ${label} | ${cells.join(" | ")} | ${row.total} |`);
+  }
+  out.push("");
+  out.push(
+    `Dates came from a repository for ${dateSources.repository} of the graded ` +
+      `endpoints (${pct(dateSources.repository, graded.length)}), from the ` +
+      `registry entry for ${dateSources.registry}, and could not be had at all ` +
+      `for ${dateSources.none}.` +
+      (dateStats?.rateLimited
+        ? " **The GitHub rate limit was reached mid-run**, so the undated row is " +
+          "larger than it needs to be — re-run with a `GITHUB_TOKEN` for a " +
+          "fuller picture."
+        : ""),
+  );
+  out.push("");
+  out.push(
+    "The two dates are not the same claim. A repository push is evidence about " +
+      "the code; a registry `updatedAt` only says when someone last published " +
+      "an entry, which for a server listed once and forgotten is its original " +
+      "publication date. Rows resting on the weaker signal are counted, but the " +
+      "split above is how you can tell how much of the table they hold up.",
+  );
+  out.push("");
   out.push("## Grades");
   out.push("");
   out.push("| Grade | Servers | Share |");
@@ -381,12 +717,15 @@ function renderMarkdown({ probed, summary, entries, localOnly, startedAt }) {
   if (NAME_SERVERS) {
     out.push("## Per server");
     out.push("");
-    out.push("| Server | Grade | Findings |");
-    out.push("| --- | --- | --- |");
+    out.push("| Server | Era | Last activity | Grade | Findings |");
+    out.push("| --- | --- | --- | --- | --- |");
     for (const p of probed) {
       const grade = p.outcome === "graded" ? p.grade.letter : `— (${OUTCOME_LABEL[p.outcome]})`;
       const ids = (p.findings ?? []).map((f) => f.ruleId).join(", ") || "—";
-      out.push(`| ${p.name} | ${grade} | ${ids} |`);
+      const when = p.lastActivityAt
+        ? `${p.lastActivityAt.slice(0, 10)} (${p.activitySource})`
+        : "—";
+      out.push(`| ${p.name} | ${p.era ?? "—"} | ${when} | ${grade} | ${ids} |`);
     }
     out.push("");
   }
@@ -410,13 +749,26 @@ function renderMarkdown({ probed, summary, entries, localOnly, startedAt }) {
       "and only the ones publishing a remote endpoint appear above at all.",
   );
   out.push(
-    "- **A live probe sees six of the seven rules.** MCP007 reads a " +
-      "`package.json`, which a probe does not have.",
+    "- **Dating is coverage-limited, not complete.** A registry entry with no " +
+      "repository link, a repository somewhere other than GitHub, and a " +
+      "rate-limited run all land in the undated row. Treat that row as unknown, " +
+      "not as either answer.",
   );
   out.push(
-    "- **Seven rules are not the whole revision.** A server can pass every rule " +
-      "here and still be broken — `server/discover`, `resultType`, " +
-      "`subscriptions/listen` and the new required headers are not covered.",
+    "- **A push is not a release.** A repository touched last week may have had " +
+      "a typo fixed in its README; one untouched for a year may be finished " +
+      "software that works. The date separates *abandoned* from *maintained*, " +
+      "which is a coarser question than *cared for*.",
+  );
+  out.push(
+    "- **A live probe sees every rule but one.** MCP007 reads a `package.json`, " +
+      "which a probe does not have.",
+  );
+  out.push(
+    "- **These rules are not the whole revision.** A server can pass every rule " +
+      "here and still be broken — `resultType`, `subscriptions/listen`, the " +
+      "removal of `ping` and `logging/setLevel`, and the required `Mcp-Method` / " +
+      "`Mcp-Name` headers are not covered.",
   );
   out.push(
     "- **Legacy-only is a claim about what answered, not about what exists.** " +
@@ -505,6 +857,18 @@ if (targets.length === 0) {
 
 console.error(`Probing ${targets.length} endpoints…`);
 const probed = await probeAll(targets, checkpoint);
+
+// Dating runs after probing on purpose: the probe is the expensive, resumable
+// half, and a GitHub outage must not cost it.
+const { path: datePath, cache: dateCache } = await loadDateCache(startedAt);
+let dateStats = { asked: 0, cached: dateCache.size, rateLimited: false, failed: 0 };
+if (!SKIP_DATES) {
+  console.error("Dating repositories…");
+  dateStats = await collectRepoDates(targets, dateCache);
+  await saveDateCache(datePath, dateCache, startedAt);
+}
+attachActivity(probed, dateCache, startedAt);
+
 const summary = summarize(probed);
 
 await mkdir(OUT_DIR, { recursive: true });
@@ -522,6 +886,13 @@ await writeFile(
       outcomes: summary.outcomes,
       graded: summary.graded.length,
       eras: summary.eras,
+      byActivity: summary.byActivity,
+      dateSources: summary.dateSources,
+      touchedSinceSpec: summary.touchedSinceSpec,
+      legacyAmongTouched: summary.legacyAmongTouched,
+      activeWindowDays: ACTIVE_WINDOW_DAYS,
+      specReleasedAt: SPEC_RELEASED_AT,
+      dateStats,
       withCritical: summary.withCritical,
       grades: summary.grades,
       ruleCounts: summary.ruleCounts,
@@ -532,14 +903,32 @@ await writeFile(
     2,
   ) + "\n",
 );
-await writeFile(mdPath, renderMarkdown({ probed, summary, entries, localOnly, startedAt }));
+await writeFile(
+  mdPath,
+  renderMarkdown({ probed, summary, entries, localOnly, startedAt, dateStats }),
+);
 
 console.error("");
 for (const [key, label] of Object.entries(OUTCOME_LABEL)) {
   console.error(`  ${String(summary.outcomes[key]).padStart(5)}  ${label}`);
 }
+console.error("");
+for (const [key, label] of Object.entries(ERA_LABEL)) {
+  console.error(`  ${String(summary.eras[key]).padStart(5)}  ${label.replace(/\*\*/g, "")}`);
+}
 console.error(
-  `\n  ${summary.withCritical} of ${summary.graded.length} graded ` +
+  `\n  ${summary.eras.legacy} of ${summary.graded.length} graded ` +
+    `(${pct(summary.eras.legacy, summary.graded.length)}) serve the legacy protocol only`,
+);
+if (summary.touchedSinceSpec > 0) {
+  console.error(
+    `  ${summary.legacyAmongTouched} of ${summary.touchedSinceSpec} touched since ` +
+      `${SPEC_RELEASED_AT} (${pct(summary.legacyAmongTouched, summary.touchedSinceSpec)}) ` +
+      "are still legacy-only",
+  );
+}
+console.error(
+  `  ${summary.withCritical} of ${summary.graded.length} graded ` +
     `(${pct(summary.withCritical, summary.graded.length)}) have a critical finding`,
 );
 console.error("");

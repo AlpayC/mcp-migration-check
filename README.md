@@ -321,8 +321,25 @@ npm run report:ecosystem -- --limit 500 --concurrency 6
 Pulls the remote endpoints out of the
 [official MCP registry](https://registry.modelcontextprotocol.io), probes each
 one with the same engine, and writes an aggregate snapshot to `reports/`: how
-many endpoints answered, the grade distribution, and how often each rule fires.
-`--name-servers` adds a per-server table.
+many endpoints answered, which protocol era each serves, the grade
+distribution, and how often each rule fires. `--name-servers` adds a per-server
+table.
+
+**Dating the sample.** A dead endpoint that still returns 200 is
+indistinguishable from a maintained one that chose not to migrate — unless you
+can date it, and the registry skews heavily toward servers listed once and
+never touched again. So each row is dated: from the linked GitHub repository's
+last push where there is one, and from the registry entry's own `updatedAt`
+otherwise. The report cross-tabs protocol era against that date, and restates
+the headline over the servers whose code has been touched since the revision
+shipped — the ones that *could* have migrated. Set `GITHUB_TOKEN` for it to
+cover more than 60 repositories an hour; without one the run dates what it can
+and prints the coverage rather than guessing. `--no-dates` skips the pass,
+`--active-window <days>` moves the line (default 180).
+
+The two dates are not the same claim and the report says which one each row
+rests on: a push is evidence about the code, a registry timestamp only says
+when somebody last published an entry.
 
 Two things about it are deliberate.
 

@@ -32,3 +32,5 @@ skill/mcp-migration-workspace/eval-review.html
 reports/*.json
 # Probe checkpoints: a live run's scratch file, not a publication.
 reports/.ecosystem-*.progress.jsonl
+# The GitHub date cache backing the maintenance split.
+reports/.repo-dates.json
