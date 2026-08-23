@@ -40,6 +40,8 @@
  *   --fresh            Ignore today's checkpoint and probe everything again
  *   --no-dates         Skip repository dating (see below)
  *   --active-window <days>  How recent counts as maintained (default 180)
+ *   --top-up           Re-date and re-render a finished report, probing nothing
+ *   --from <path>      Which report JSON --top-up reads (default: today's)
  *
  * DATING, AND WHY THE DENOMINATOR NEEDS IT
  *
@@ -87,6 +89,7 @@ const OUT_DIR = resolve(process.cwd(), flag("out", "reports"));
 const NAME_SERVERS = has("name-servers");
 const FRESH = has("fresh");
 const SKIP_DATES = has("no-dates");
+const TOP_UP = has("top-up");
 const ACTIVE_WINDOW_DAYS = Number(flag("active-window", "180"));
 
 /**
@@ -205,9 +208,10 @@ function githubRepoKey(url) {
  *
  * Deduplicated by repository, because one repo commonly publishes several
  * registry entries. Stops the moment the rate limit is exhausted rather than
- * spending an hour on 403s — everything not reached stays `undated`, which the
- * report prints. A dating pass that silently covers a third of the sample and
- * says nothing is worse than no dating at all.
+ * spending an hour on 403s. Everything not reached falls back to the registry
+ * timestamp, and the report prints the source split. A dating pass that
+ * silently covers a third of the sample and says nothing is worse than no
+ * dating at all.
  */
 async function collectRepoDates(targets, cache) {
   const keys = new Set();
@@ -222,7 +226,8 @@ async function collectRepoDates(targets, cache) {
   if (!GITHUB_TOKEN) {
     console.error(
       `  no GITHUB_TOKEN — GitHub allows 60 requests/hour unauthenticated, and ` +
-        `${keys.size} repositories need dating. Most rows will be undated.`,
+        `${keys.size} repositories need dating. Most rows will use the ` +
+        `registry timestamp instead.`,
     );
   }
 
@@ -255,7 +260,7 @@ async function collectRepoDates(targets, cache) {
             console.error(
               `\n  GitHub rate limit reached after ${stats.asked} repositories` +
                 (reset ? `; it resets at ${new Date(reset).toISOString()}` : "") +
-                `. The rest stay undated.`,
+              `. The rest fall back to registry timestamps.`,
             );
             return;
           }
@@ -523,6 +528,15 @@ function summarize(probed) {
   const dateSources = { repository: 0, registry: 0, none: 0 };
   for (const p of graded) dateSources[p.activitySource ?? "none"]++;
 
+  // Rows that *could* have carried a repository date and did not. This is what
+  // an exhausted rate limit actually costs: not an undated row, because the
+  // registry timestamp always fills in, but a row resting on the weaker of the
+  // two signals without that being visible in the table.
+  const repoLinked = graded.filter((p) => p.repository).length;
+  const weakened = graded.filter(
+    (p) => p.repository && p.activitySource !== "repository",
+  ).length;
+
   // Servers whose repository has not been touched since the revision shipped
   // cannot have migrated — counting them as "declined to migrate" is the
   // mistake that inflates a headline.
@@ -549,6 +563,8 @@ function summarize(probed) {
     dateSources,
     touchedSinceSpec: touchedSinceSpec.length,
     legacyAmongTouched,
+    repoLinked,
+    weakened,
     ruleCounts,
     outcomes,
     withCritical,
@@ -566,6 +582,8 @@ function renderMarkdown({ probed, summary, entries, localOnly, startedAt, dateSt
     dateSources,
     touchedSinceSpec,
     legacyAmongTouched,
+    repoLinked,
+    weakened,
     ruleCounts,
     outcomes,
     withCritical,
@@ -678,12 +696,20 @@ function renderMarkdown({ probed, summary, entries, localOnly, startedAt, dateSt
     `Dates came from a repository for ${dateSources.repository} of the graded ` +
       `endpoints (${pct(dateSources.repository, graded.length)}), from the ` +
       `registry entry for ${dateSources.registry}, and could not be had at all ` +
-      `for ${dateSources.none}.` +
+      `for ${dateSources.none}.`,
+  );
+  out.push("");
+  out.push(
+    `${repoLinked} graded endpoints link a repository, so that is the ceiling on ` +
+      `the stronger signal. ${weakened} of them are counted on the registry ` +
+      `timestamp anyway` +
       (dateStats?.rateLimited
-        ? " **The GitHub rate limit was reached mid-run**, so the undated row is " +
-          "larger than it needs to be — re-run with a `GITHUB_TOKEN` for a " +
-          "fuller picture."
-        : ""),
+        ? ", because the GitHub rate limit was reached mid-run. Nothing went " +
+          "undated — the registry date always fills in — but that many rows rest " +
+          "on the weaker of the two signals. Re-running the dating pass after " +
+          "the limit resets moves them across."
+        : ", because GitHub had no answer for them: the repository is private, " +
+          "renamed, deleted, or not hosted there."),
   );
   out.push("");
   out.push(
@@ -749,10 +775,11 @@ function renderMarkdown({ probed, summary, entries, localOnly, startedAt, dateSt
       "and only the ones publishing a remote endpoint appear above at all.",
   );
   out.push(
-    "- **Dating is coverage-limited, not complete.** A registry entry with no " +
-      "repository link, a repository somewhere other than GitHub, and a " +
-      "rate-limited run all land in the undated row. Treat that row as unknown, " +
-      "not as either answer.",
+    "- **Dating uses a labelled fallback.** Where a GitHub repository date is " +
+      "available, the report uses its last push. Otherwise it falls back to " +
+      "the registry entry's `updatedAt`; only a row with neither source is " +
+      "undated. The source split above shows how much of the report rests on " +
+      "each signal.",
   );
   out.push(
     "- **A push is not a release.** A repository touched last week may have had " +
@@ -840,34 +867,79 @@ async function openCheckpoint(day) {
   };
 }
 
-const startedAt = new Date().toISOString();
+const now = new Date().toISOString();
+
+/**
+ * Top-up mode: finish the dating of a report that already exists.
+ *
+ * GitHub's limit is 5,000 requests an hour and the registry has more
+ * repositories than that, so a full run can exhaust it partway and leave the
+ * rest of the rows resting on the weaker registry timestamp. Re-probing 13,000
+ * endpoints to fix that would cost hours and tell us nothing new about the
+ * protocol, so this reads the probe results back out of the JSON, asks GitHub
+ * only about the repositories still missing from the cache, and re-renders.
+ *
+ * Run it again after the limit resets. Each pass picks up where the last one
+ * stopped, because the date cache persists for a week.
+ */
+let probed;
+let entries;
+let localOnly;
+let startedAt;
+let checkpoint = null;
+
+if (TOP_UP) {
+  const fromPath = resolve(process.cwd(), flag("from", "") || resolve(OUT_DIR, `ecosystem-${now.slice(0, 10)}.json`));
+  let prior;
+  try {
+    prior = JSON.parse(await readFile(fromPath, "utf8"));
+  } catch (err) {
+    console.error(`Cannot read ${fromPath}: ${err.message}`);
+    console.error("  --top-up needs the JSON from a completed run; point at it with --from <path>.");
+    process.exit(2);
+  }
+  probed = prior.results ?? [];
+  entries = prior.registryEntries;
+  localOnly = prior.localOnly;
+  // The probe date belongs to the original run. Only the dates are new.
+  startedAt = prior.startedAt ?? now;
+  console.error(`Top-up: ${probed.length} probed endpoints read from ${fromPath}`);
+  console.error(`  (probed ${startedAt}; no endpoint will be contacted again)`);
+} else {
+  startedAt = now;
+  checkpoint = await openCheckpoint(startedAt.slice(0, 10));
+  if (checkpoint.done.size > 0) {
+    console.error(`Resuming: ${checkpoint.done.size} endpoint(s) already probed today.`);
+    console.error(`  (--fresh to start over; the file is ${checkpoint.path})`);
+  }
+
+  console.error("Collecting targets from the MCP registry…");
+  const collected = await collectTargets();
+  if (collected.targets.length === 0) {
+    console.error("No remote endpoints found — nothing to probe.");
+    process.exit(2);
+  }
+  entries = collected.entries;
+  localOnly = collected.localOnly;
+
+  console.error(`Probing ${collected.targets.length} endpoints…`);
+  probed = await probeAll(collected.targets, checkpoint);
+}
+
 const day = startedAt.slice(0, 10);
-const checkpoint = await openCheckpoint(day);
-if (checkpoint.done.size > 0) {
-  console.error(`Resuming: ${checkpoint.done.size} endpoint(s) already probed today.`);
-  console.error(`  (--fresh to start over; the file is ${checkpoint.path})`);
-}
-
-console.error("Collecting targets from the MCP registry…");
-const { targets, entries, localOnly } = await collectTargets();
-if (targets.length === 0) {
-  console.error("No remote endpoints found — nothing to probe.");
-  process.exit(2);
-}
-
-console.error(`Probing ${targets.length} endpoints…`);
-const probed = await probeAll(targets, checkpoint);
 
 // Dating runs after probing on purpose: the probe is the expensive, resumable
-// half, and a GitHub outage must not cost it.
-const { path: datePath, cache: dateCache } = await loadDateCache(startedAt);
+// half, and a GitHub outage must not cost it. The probed rows carry the
+// registry's `repository` field, so they are what the dating pass reads —
+// which is also what makes a top-up run possible without a registry walk.
+const { path: datePath, cache: dateCache } = await loadDateCache(now);
 let dateStats = { asked: 0, cached: dateCache.size, rateLimited: false, failed: 0 };
 if (!SKIP_DATES) {
   console.error("Dating repositories…");
-  dateStats = await collectRepoDates(targets, dateCache);
-  await saveDateCache(datePath, dateCache, startedAt);
+  dateStats = await collectRepoDates(probed, dateCache);
+  await saveDateCache(datePath, dateCache, now);
 }
-attachActivity(probed, dateCache, startedAt);
+attachActivity(probed, dateCache, now);
 
 const summary = summarize(probed);
 
@@ -935,8 +1007,9 @@ console.error("");
 console.error(`Wrote ${jsonPath}`);
 console.error(`Wrote ${mdPath}`);
 
-// The report is written, so the checkpoint has done its job.
-await checkpoint.discard();
+// The report is written, so the checkpoint has done its job. A top-up run
+// never opened one — it had no endpoints to probe.
+await checkpoint?.discard();
 
 // A probe that blew its deadline is still out there holding a socket, and an
 // open socket keeps the event loop alive — the process would sit here having
