@@ -11,6 +11,10 @@
 > **[Try it → mcp-migration-check.alpaycelik.workers.dev](https://mcp-migration-check.alpaycelik.workers.dev)**
 > Paste an MCP endpoint, get a graded report. Nothing to install, nothing stored.
 
+**[State of MCP migration — 2026-08-23](./reports/ecosystem-2026-08-23.md)** —
+13,350 unique remote endpoints from the official registry probed; 10,812
+returned enough protocol or authentication signal to grade.
+
 [![The web demo grading a live MCP endpoint: a C, one critical finding for the legacy initialize handshake, with the fix and a link to the spec section it derives from](./docs/screenshot.png)](https://mcp-migration-check.alpaycelik.workers.dev)
 
 The [Model Context Protocol](https://modelcontextprotocol.io) revision dated

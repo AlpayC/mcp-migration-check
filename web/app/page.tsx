@@ -19,7 +19,12 @@ import { Marquee } from "@/components/ui/marquee";
 import { NumberTicker } from "@/components/ui/number-ticker";
 import { Ripple } from "@/components/ui/ripple";
 import { RippleButton } from "@/components/ui/ripple-button";
-import { AUTHOR_URL, RELEASES_URL, REPO_URL } from "@/lib/site";
+import {
+  AUTHOR_URL,
+  ECOSYSTEM_REPORT_URL,
+  RELEASES_URL,
+  REPO_URL,
+} from "@/lib/site";
 import { cn } from "@/lib/utils";
 
 type Band = "ok" | "warn" | "bad";
@@ -214,6 +219,21 @@ export default function Home() {
             dropped several capabilities — a refactor, not a version bump. Point
             the checker at a running endpoint to see what breaks.
           </p>
+        </BlurFade>
+
+        <BlurFade delay={0.26} className="flex justify-center">
+          <a
+            href={ECOSYSTEM_REPORT_URL}
+            target="_blank"
+            rel="noreferrer"
+            className="mt-5 inline-flex items-center gap-2 whitespace-nowrap rounded-full border border-accent/25 bg-accent/[0.08] px-3.5 py-1.5 text-[12.5px] text-muted transition-colors hover:border-accent/50 hover:text-foreground"
+          >
+            <span className="font-mono text-accent">2026-08-23 snapshot</span>
+            <span aria-hidden>·</span>
+            <span className="hidden sm:inline">13,350 endpoints probed</span>
+            <span className="sm:hidden">13,350 probed</span>
+            <span aria-hidden>→</span>
+          </a>
         </BlurFade>
 
         {/* ---------- console ---------- */}
@@ -418,7 +438,7 @@ export default function Home() {
           </section>
         )}
 
-        {/* ---------- skill ---------- */}
+        {/* ---------- distribution ---------- */}
         <BlurFade delay={0.1} inView>
           <section className="relative mt-20 overflow-hidden rounded-2xl border border-white/10 bg-panel p-6 sm:p-7">
             <BorderBeam
@@ -430,70 +450,96 @@ export default function Home() {
             />
 
             <span className="font-mono text-[11px] uppercase tracking-[0.16em] text-muted">
-              The other half
+              One engine · four ways to use it
             </span>
             <h2 className="mt-2 font-display text-2xl font-semibold tracking-tight">
-              This page tells you <span className="text-warn">what</span> breaks.
-              Fixing it takes a week.
+              Check once, gate every PR, then{" "}
+              <span className="text-warn">fix what fired</span>.
             </h2>
             <p className="mt-3 max-w-[62ch] text-[14.5px] leading-relaxed text-muted">
-              A probe only sees the outside. Removing session state is a design
-              change no tool can make for you — the official codemod handles the
-              SDK rename and stops there, by its own description. So the same
-              rule engine also ships as an agent skill that reads the code,
-              triages what is real, and works through the rest in order.
+              The browser is the fastest outside-in check. The same deterministic
+              rules ship as a zero-install CLI, a GitHub Action, and an agent
+              skill that reads the code and works through each remediation.
             </p>
 
             <div className="mt-6 grid gap-4 sm:grid-cols-2">
               <div className="rounded-xl border border-white/10 bg-raised p-4">
                 <div className="font-display text-[15px] font-semibold">
-                  Run it anywhere
+                  Run once from the terminal
                 </div>
                 <p className="mt-1 text-[13px] leading-relaxed text-muted">
-                  One file, no dependencies beyond Node. Works in any terminal,
-                  any agent, any CI.
+                  No install and no runtime dependencies. Probe a URL or scan a
+                  repository.
                 </p>
                 <pre className="mt-3 overflow-x-auto rounded-lg border border-white/10 bg-input p-3 font-mono text-[12px] leading-relaxed text-foreground">
-                  <code>{`node mcpcheck.mjs --source ./my-server
-node mcpcheck.mjs https://example.com/mcp`}</code>
+                  <code>{`npx mcp-migration-check <url>
+npx mcp-migration-check --source .`}</code>
                 </pre>
               </div>
 
               <div className="rounded-xl border border-white/10 bg-raised p-4">
                 <div className="font-display text-[15px] font-semibold">
-                  Or install the skill
+                  Gate every pull request
                 </div>
                 <p className="mt-1 text-[13px] leading-relaxed text-muted">
-                  Diagnosis plus the per-rule migration procedure, keyed by the
-                  rule ids above.
+                  Add the bundled GitHub Action and fail only when the selected
+                  severity threshold is reached.
                 </p>
-                <div className="mt-3 flex flex-wrap gap-2">
-                  <GlareHover
-                    background="transparent"
-                    color="#a8bcff"
-                    opacity={0.35}
-                    size={200}
-                    duration={550}
-                    className="rounded-lg"
-                  >
-                    <a
-                      href={RELEASES_URL}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="block rounded-lg border border-accent/40 bg-accent/[0.14] px-3.5 py-2 text-[13px] font-medium text-foreground transition-colors hover:border-accent/70"
-                    >
-                      Download .skill
-                    </a>
-                  </GlareHover>
-                  <a
-                    href={REPO_URL}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="rounded-lg border border-white/10 bg-panel px-3.5 py-2 text-[13px] text-muted transition-colors hover:border-white/25 hover:text-foreground"
-                  >
-                    Read the source
-                  </a>
+                <pre className="mt-3 overflow-x-auto rounded-lg border border-white/10 bg-input p-3 font-mono text-[12px] leading-relaxed text-foreground">
+                  <code>{`- uses: AlpayC/mcp-migration-check@v1
+  with:
+    source: .
+    fail-on: critical`}</code>
+                </pre>
+                <a
+                  href={`${REPO_URL}#github-action`}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="mt-3 inline-flex text-[13px] text-accent transition-colors hover:text-foreground"
+                >
+                  See Action inputs →
+                </a>
+              </div>
+
+              <div className="rounded-xl border border-white/10 bg-raised p-4 sm:col-span-2">
+                <div className="font-display text-[15px] font-semibold">
+                  Fix it with an agent
                 </div>
+                <p className="mt-1 text-[13px] leading-relaxed text-muted">
+                  Install the Claude Code plugin for diagnosis plus the per-rule
+                  migration procedure.
+                </p>
+                <pre className="mt-3 overflow-x-auto rounded-lg border border-white/10 bg-input p-3 font-mono text-[12px] leading-relaxed text-foreground">
+                  <code>{`/plugin marketplace add AlpayC/mcp-migration-check
+/plugin install mcp-migration@mcp-migration-check`}</code>
+                </pre>
+                <a
+                  href={RELEASES_URL}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="mt-3 inline-flex text-[13px] text-accent transition-colors hover:text-foreground"
+                >
+                  Or download the .skill →
+                </a>
+              </div>
+
+              <div className="rounded-xl border border-white/10 bg-raised p-4 sm:col-span-2">
+                <div className="font-display text-[15px] font-semibold">
+                  See the ecosystem snapshot
+                </div>
+                <p className="mt-1 text-[13px] leading-relaxed text-muted">
+                  13,350 unique remote registry endpoints probed. The report
+                  separates gradeable responses from endpoints that exposed no
+                  protocol or authentication signal, plus unreachable targets.
+                </p>
+                <a
+                  href={ECOSYSTEM_REPORT_URL}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="mt-3 inline-flex rounded-lg border border-accent/40 bg-accent/[0.14] px-3.5 py-2 text-[13px] font-medium text-foreground transition-colors hover:border-accent/70"
+                >
+                  Read the 2026-08-23 report →
+                </a>
               </div>
             </div>
           </section>
