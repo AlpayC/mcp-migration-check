@@ -87,7 +87,19 @@ if (report.inconclusive) {
     md.push("| --- | --- | --- | --- |");
     for (const f of findings) {
       // Cell text is scanned source, so it can contain pipes and newlines.
-      const cell = (s) => String(s ?? "").replace(/\|/g, "\\|").replace(/\s*\n\s*/g, " ");
+      //
+      // Backslashes go first. Escaping `|` as `\|` without escaping the
+      // backslash itself leaves `a\|b` as `a\\|b`, which Markdown reads as a
+      // literal backslash followed by a live cell separator — the escaping
+      // undoes itself on exactly the input it exists for. `\s+` rather than
+      // `\s*\n\s*` because `\n` is itself whitespace, so the two `\s*` overlap
+      // it and a long run of blanks backtracks quadratically.
+      const cell = (s) =>
+        String(s ?? "")
+          .replace(/\\/g, "\\\\")
+          .replace(/\|/g, "\\|")
+          .replace(/\s+/g, " ")
+          .trim();
       md.push(
         `| [${f.ruleId}](${f.specRef}) | ${f.severity} | ${cell(f.title)} | ${cell(f.location) || "—"} |`,
       );
