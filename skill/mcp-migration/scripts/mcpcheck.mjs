@@ -39,7 +39,7 @@ function servesModern(ctx) {
 }
 function versionsClause(ctx) {
   const v = ctx.live?.supportedVersions ?? [];
-  return v.length > 0 ? ` It names ${v.join(", ")} as supported.` : "";
+  return v.length > 0 ? ` (naming ${v.join(", ")} as supported)` : "";
 }
 var rules = [
   {

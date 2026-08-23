@@ -92,10 +92,17 @@ function servesModern(ctx: RuleContext): boolean {
   return (ctx.source?.matches.modernEra?.length ?? 0) > 0;
 }
 
-/** The `supportedVersions` clause used in several details, or an empty string. */
+/**
+ * The `supportedVersions` clause, or an empty string.
+ *
+ * Parenthetical, not a sentence: it is spliced into the middle of one, and an
+ * earlier version ended it with a full stop — which read as
+ * "…the current revision It names 2026-07-28 as supported. and also answers…"
+ * against a real server.
+ */
 function versionsClause(ctx: RuleContext): string {
   const v = ctx.live?.supportedVersions ?? [];
-  return v.length > 0 ? ` It names ${v.join(", ")} as supported.` : "";
+  return v.length > 0 ? ` (naming ${v.join(", ")} as supported)` : "";
 }
 
 export const rules: Rule[] = [

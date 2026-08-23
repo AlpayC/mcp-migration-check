@@ -30,3 +30,5 @@ skill/mcp-migration-workspace/eval-review.html
 # to be committed when a snapshot is worth keeping; the JSON alongside it names
 # every server probed, which is a deliberately different thing to publish.
 reports/*.json
+# Probe checkpoints: a live run's scratch file, not a publication.
+reports/.ecosystem-*.progress.jsonl

@@ -109,6 +109,23 @@ test("MCP101 never fires for a server that has no modern surface", () => {
   assert.ok(!ids({ live: legacyOnly() }).includes("MCP101"));
 });
 
+test("MCP101 reads as one sentence with and without a version list", () => {
+  // Caught against a live dual-era server: the versions clause ended in a full
+  // stop while being spliced mid-sentence, giving "…the current revision It
+  // names 2026-07-28 as supported. and also answers…".
+  for (const versions of [["2026-07-28"], []]) {
+    const f = evaluate({ live: dualEra({ supportedVersions: versions }) }).find(
+      (x) => x.ruleId === "MCP101",
+    );
+    assert.ok(f);
+    assert.ok(
+      !/\.\s+(and|which|that)\b/.test(f.detail),
+      `MCP101 detail has a stray full stop: ${f.detail}`,
+    );
+    assert.ok(!/\s{2,}/.test(f.detail), `MCP101 detail has a double space: ${f.detail}`);
+  }
+});
+
 test("MCP001 fires on a source match and reports file:line", () => {
   const findings = evaluate({ source: source("initialize", { line: 7 }) });
   const f = findings.find((x) => x.ruleId === "MCP001");
