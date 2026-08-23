@@ -321,6 +321,8 @@ async function checkOAuthMetadata(url, wwwAuthenticate, doFetch, timeoutMs) {
         method: "GET",
         signal: controller.signal
       });
+      await res.body?.cancel().catch(() => {
+      });
       if (res.ok) return true;
     } catch {
     } finally {
