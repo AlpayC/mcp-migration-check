@@ -12,8 +12,12 @@
 > Paste an MCP endpoint, get a graded report. Nothing to install, nothing stored.
 
 **[State of MCP migration — 2026-08-23](./reports/ecosystem-2026-08-23.md)** —
-13,350 unique remote endpoints from the official registry probed; 10,812
-returned enough protocol or authentication signal to grade.
+13,380 unique remote endpoints from the official registry probed; 10,890
+returned enough protocol or authentication signal to grade. **60.1% serve the
+legacy protocol only.** A further 5.5% are dual-era — current *and* still
+answering the old handshake, which the revision permits and this report does
+not count against them. An earlier version of this snapshot could not tell
+those two apart; see [the postmortem](#mcp001-told-servers-to-break-their-own-users).
 
 [![The web demo grading a live MCP endpoint: a C, one critical finding for the legacy initialize handshake, with the fix and a link to the spec section it derives from](./docs/screenshot.png)](https://mcp-migration-check.alpaycelik.workers.dev)
 
@@ -155,44 +159,93 @@ node skill/mcp-migration/scripts/mcpcheck.mjs --local http://localhost:3000/mcp
 
 ## What it checks
 
-| Rule   | Severity | Signal                                                    |
-| ------ | -------- | --------------------------------------------------------- |
-| MCP001 | critical | legacy `initialize` handshake (stateless model removes it) |
-| MCP002 | critical | `Mcp-Session-Id` / session state — the classic hazard      |
-| MCP003 | warning  | deprecated `logging` capability                            |
-| MCP004 | warning  | deprecated `sampling` capability                           |
-| MCP005 | warning  | deprecated `roots` capability                              |
-| MCP006 | critical | auth without RFC 9728 protected-resource metadata          |
-| MCP007 | warning  | still on `@modelcontextprotocol/sdk` (the v1 line)          |
+| Rule   | Severity | Signal                                                              |
+| ------ | -------- | ------------------------------------------------------------------- |
+| MCP001 | critical | legacy-only: answers `initialize`, serves no modern surface          |
+| MCP002 | critical | `Mcp-Session-Id` minted for a *modern* request — the classic hazard  |
+| MCP003 | warning  | deprecated `logging` capability                                      |
+| MCP004 | warning  | deprecated `sampling` capability                                     |
+| MCP005 | warning  | deprecated `roots` capability                                        |
+| MCP006 | critical | auth without RFC 9728 protected-resource metadata                    |
+| MCP007 | warning  | still on `@modelcontextprotocol/sdk` (the v1 line)                   |
+| MCP008 | warning  | modern server that does not implement `server/discover`              |
+| MCP101 | info     | dual-era: current **and** still accepts the legacy handshake         |
+| MCP102 | info     | session ids issued to legacy clients only                            |
 
 Live checks observe runtime behavior over HTTP; source scans grep for the same
 signals in code. Each finding links the spec page it derives from.
 
+**Backwards compatibility is not a finding.** The `MCP1xx` rules are
+observations and cost zero points. `2026-07-28` says a server that wants to
+serve both kinds of client [**MAY** implement both
+behaviours](https://modelcontextprotocol.io/specification/2026-07-28/basic/versioning),
+picking its semantics from how each request opens — so a server that answers
+`initialize` for the v1 clients still in the field is being compatible, not
+drifted. The live probe therefore opens as a *modern* client
+(`server/discover` with per-request `_meta` and the required
+`MCP-Protocol-Version` header) and only then tries the legacy handshake. Only
+the absence of the modern surface is a defect.
+
 ## Honest limitations
 
-- **Seven rules are not the whole revision.** The 2026-07-28 changelog also makes
+- **These rules are not the whole revision.** The 2026-07-28 changelog also makes
   `server/discover` mandatory, requires a `resultType` on every result, replaces
   the GET stream and `resources/subscribe` with `subscriptions/listen`, removes
   `ping`, `logging/setLevel` and SSE resumability, and requires `Mcp-Method` /
-  `Mcp-Name` headers. A server can pass all seven rules and still be broken. This
-  is a triage tool, not a conformance suite.
+  `Mcp-Name` headers. A server can pass every rule here and still be broken.
+  This is a triage tool, not a conformance suite.
 - **The source scan is heuristic.** It greps for patterns, so it can miss
   dynamically-built capability names and can over-match inside comments.
   Treat source findings as signals to review, not proof. The live probe is
   more authoritative for runtime behavior; the two complement each other.
-- **The web demo only sees the outside.** It probes over HTTP, so it reaches at
-  most six of the seven rules — MCP007 needs a `package.json`, and MCP002 is far
-  easier to spot in code than in a header. Use the skill for real work.
-- **MCP001 fires against essentially every server in existence** today, because
-  every current server answers `initialize`. That is the point of the rule, but
-  it does mean a passing grade is rare and the scale is not well spread.
+- **The web demo only sees the outside.** It probes over HTTP, so it cannot
+  reach MCP007, which needs a `package.json`. Use the skill for real work.
+- **MCP001 proves absence, which is the weaker claim.** It fires when the
+  legacy handshake answers and no modern signal did. A server whose modern
+  surface is hidden behind a WAF, a path-based gateway or an unfamiliar-method
+  filter lands there wrongly. The dual-era observation cannot fail the same
+  way — it needs a positive modern answer to fire at all.
 - **MCP007 is TypeScript-only.** It reads `package.json`, so a Python, Go or C#
   server gets no SDK signal at all — even though those SDKs also moved (Python
   and C# to 2.x, Go to a 1.x minor).
 
-## A rule that was wrong
+## Two rules that were wrong
 
 Worth recording, because it shaped how the rest is verified.
+
+### MCP001 told servers to break their own users
+
+The first version of MCP001 fired on any endpoint that answered `initialize`
+and told the maintainer to *"remove the initialize/initialized handshake"*.
+Taking that advice would have cut off every v1 client still pointed at the
+server, for no compliance gain — because `2026-07-28` never asked for it:
+
+> A server that wishes to support both legacy clients (which expect an
+> `initialize` handshake) and modern clients (which use per-request metadata)
+> **MAY** implement both behaviors.
+> — [Versioning: Backward Compatibility](https://modelcontextprotocol.io/specification/2026-07-28/basic/versioning)
+
+The probe made it worse by only ever speaking as a legacy client: it sent one
+`initialize` carrying `protocolVersion: 2025-11-25` and reported the answer as
+drift. It never asked the modern question at all, so a dual-era server — the
+mark of a *maintained* one — was indistinguishable from an abandoned v1 server.
+
+What changed:
+
+- The probe opens as a modern client (`server/discover` with per-request
+  `_meta` and the required headers), falls back to a modern `tools/list`, and
+  only then tries the legacy handshake.
+- `-32601` is explicitly *not* treated as modern evidence — every JSON-RPC
+  server emits it for an unknown method. Only the `-32020…-32099` range the
+  spec reserves for itself counts, along with a result carrying `resultType`.
+- "Still accepts legacy" (MCP101, info, zero points) is split from "only
+  accepts legacy" (MCP001, critical). Only the second is a finding.
+- `info` findings now cost nothing, so compatibility cannot pull a grade down.
+
+Pinned by tests, including one asserting MCP001's fix text never says to remove
+the handshake.
+
+### MCP007 named a version that never existed
 
 MCP007 originally fired on `@modelcontextprotocol/sdk` below `2.0.0` and told
 you to upgrade to `^2` and run "the official v1→v2 codemod". Both halves were
@@ -239,7 +292,7 @@ scripts/ecosystem-report.mjs registry-wide readiness snapshot
 ```
 
 ```bash
-npm test              # node --test via tsx; 88 assertions, no network
+npm test              # node --test via tsx; 110 assertions, no network
 npm run typecheck
 npm run build:bundles # regenerate both copies of the engine; CI fails if stale
 ```
@@ -268,8 +321,25 @@ npm run report:ecosystem -- --limit 500 --concurrency 6
 Pulls the remote endpoints out of the
 [official MCP registry](https://registry.modelcontextprotocol.io), probes each
 one with the same engine, and writes an aggregate snapshot to `reports/`: how
-many endpoints answered, the grade distribution, and how often each rule fires.
-`--name-servers` adds a per-server table.
+many endpoints answered, which protocol era each serves, the grade
+distribution, and how often each rule fires. `--name-servers` adds a per-server
+table.
+
+**Dating the sample.** A dead endpoint that still returns 200 is
+indistinguishable from a maintained one that chose not to migrate — unless you
+can date it, and the registry skews heavily toward servers listed once and
+never touched again. So each row is dated: from the linked GitHub repository's
+last push where there is one, and from the registry entry's own `updatedAt`
+otherwise. The report cross-tabs protocol era against that date, and restates
+the headline over the servers whose code has been touched since the revision
+shipped — the ones that *could* have migrated. Set `GITHUB_TOKEN` for it to
+cover more than 60 repositories an hour; without one the run dates what it can
+and prints the coverage rather than guessing. `--no-dates` skips the pass,
+`--active-window <days>` moves the line (default 180).
+
+The two dates are not the same claim and the report says which one each row
+rests on: a push is evidence about the code, a registry timestamp only says
+when somebody last published an entry.
 
 Two things about it are deliberate.
 

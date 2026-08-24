@@ -9,8 +9,14 @@ The 2026-07-28 revision is a refactor, not a version bump. Four things this
 checker looks for break existing servers:
 
 1. **The transport is stateless.** The `initialize`/`notifications/initialized`
-   handshake and the `Mcp-Session-Id` header are gone. Every request carries its
-   own protocol version and client capabilities in `_meta`.
+   handshake and the `Mcp-Session-Id` header are gone from *this* revision.
+   Every request carries its own protocol version and client capabilities in
+   `_meta`. **This does not mean deleting the handshake.** A server "wishing to
+   support both legacy clients … and modern clients **MAY** implement both
+   behaviors" and picks its semantics from how each request opens — so the goal
+   is to *add* the modern path, and retire the legacy one on the schedule your
+   own clients dictate. Removing it for compliance breaks every v1 client for
+   no gain.
 2. **OAuth 2.1 is formalized** for remote servers: a protected MCP server acts
    as an OAuth 2.1 resource server and **MUST** implement RFC 9728
    protected-resource metadata.
@@ -68,8 +74,8 @@ running. They see different things and neither is a superset of the other:
 
 | | Source scan | Live probe |
 |---|---|---|
-| Sees | the code, `package.json`, `file:line` | headers, advertised capabilities, OAuth posture |
-| Finds | MCP001–005, **MCP007** (SDK line) | MCP001–005, **MCP006** (OAuth posture) |
+| Sees | the code, `package.json`, `file:line` | both protocol eras, headers, advertised capabilities, OAuth posture |
+| Finds | MCP001–005, **MCP007** (SDK line) | MCP001–006, **MCP008**, MCP101/102 |
 | Needs | a checkout | a reachable endpoint |
 
 Exit codes: `0` no critical findings · `1` at least one critical · `2`
@@ -93,9 +99,12 @@ So read each finding at its `file:line`, decide whether it is real, and say so
 explicitly before changing anything. A short triage table is a good artefact to
 produce here: rule, location, real or false positive, and why.
 
-Findings are graded: 100 minus 30 per critical, 15 per warning, 5 per info.
-Treat the letter grade as a headline for humans, not as the thing to optimize.
-Fixing the two criticals matters far more than the score moving from D to B.
+Findings are graded: 100 minus 30 per critical and 15 per warning. `info`
+findings (`MCP1xx`) cost **nothing** — they record compatibility choices the
+spec permits, such as a dual-era server still answering `initialize`, so that a
+report can distinguish "still accepts legacy" from "only accepts legacy". Treat
+the letter grade as a headline for humans, not as the thing to optimize. Fixing
+the criticals matters far more than the score moving from D to B.
 
 ## Step 3 — Remediate
 
@@ -113,7 +122,10 @@ ones:
    work.
 2. **MCP002 (session state)** — the deepest change, and the one most likely to
    surface hidden design assumptions.
-3. **MCP001 (handshake)** — largely mechanical once state is gone.
+3. **MCP001 (legacy-only)** — add the modern request path and
+   `server/discover`; largely mechanical once state is gone. Keep the legacy
+   handshake serving alongside it unless you have decided, as a product call,
+   to drop v1 clients.
 4. **MCP003/004/005 (deprecated capabilities)** — removals, each one localised.
    These are `warning`, not `critical`, and the deprecation window is at least
    twelve months. If the migration is already large, deferring them is a

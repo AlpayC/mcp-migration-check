@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { evaluate } from "../src/engine";
+import { evaluate, gradeFrom } from "../src/engine";
 import { rules, rulesVerifiedAt, SPEC_VERIFIED_AT } from "../src/rules";
 import type { ProbeContext, RuleContext, SourceContext, SourceMatch } from "../src/types";
 
@@ -14,13 +14,44 @@ import type { ProbeContext, RuleContext, SourceContext, SourceMatch } from "../s
 function live(overrides: Partial<ProbeContext> = {}): ProbeContext {
   return {
     reachable: true,
-    sessionIdHeaderPresent: false,
-    respondsToInitialize: false,
+    era: "unknown",
+    supportedVersions: [],
+    discoverImplemented: null,
+    modernRequestsServed: false,
+    respondsToLegacyInitialize: false,
+    legacyProtocolVersion: null,
+    sessionIdOnModernRequest: false,
+    sessionIdOnLegacyHandshake: false,
     advertisedCapabilities: [],
+    capabilitiesEra: null,
     authRequired: false,
     oauthResourceMetadata: false,
     ...overrides,
   };
+}
+
+/** A v1 server: answers the handshake, nothing modern responded. */
+function legacyOnly(overrides: Partial<ProbeContext> = {}): ProbeContext {
+  return live({
+    era: "legacy",
+    respondsToLegacyInitialize: true,
+    legacyProtocolVersion: "2025-11-25",
+    discoverImplemented: false,
+    ...overrides,
+  });
+}
+
+/** A current server that also keeps the old door open. Not a defect. */
+function dualEra(overrides: Partial<ProbeContext> = {}): ProbeContext {
+  return live({
+    era: "dual",
+    supportedVersions: ["2026-07-28"],
+    discoverImplemented: true,
+    modernRequestsServed: true,
+    respondsToLegacyInitialize: true,
+    legacyProtocolVersion: "2025-11-25",
+    ...overrides,
+  });
 }
 
 function source(signal: string, match: Partial<SourceMatch> = {}): SourceContext {
@@ -30,6 +61,7 @@ function source(signal: string, match: Partial<SourceMatch> = {}): SourceContext
     logging: [],
     sampling: [],
     roots: [],
+    modernEra: [],
   };
   return {
     matches: {
@@ -51,12 +83,47 @@ test("an empty context produces no findings", () => {
   assert.deepEqual(ids({ source: { matches: {}, sdkVersion: null, filesScanned: 0 } }), []);
 });
 
-test("MCP001 fires on a live initialize response", () => {
-  const findings = evaluate({ live: live({ respondsToInitialize: true }) });
+test("MCP001 fires when only the legacy handshake answers", () => {
+  const findings = evaluate({ live: legacyOnly() });
   const f = findings.find((x) => x.ruleId === "MCP001");
   assert.ok(f, "MCP001 should fire");
   assert.equal(f.severity, "critical");
   assert.equal(f.location, "live endpoint");
+});
+
+/**
+ * The bug this whole file was rewritten for. A dual-era server is explicitly
+ * allowed — "A server that wishes to support both legacy clients … and modern
+ * clients MAY implement both behaviors" — and the old rule called it critical
+ * and told the maintainer to delete the handshake, which would have broken
+ * every v1 client pointed at it.
+ */
+test("MCP001 stays quiet on a dual-era server, which grades a clean A", () => {
+  const found = ids({ live: dualEra() });
+  assert.ok(!found.includes("MCP001"), `MCP001 must not fire, got ${found.join(", ")}`);
+  assert.ok(found.includes("MCP101"), "the compatibility observation should be recorded");
+  assert.equal(gradeFrom(evaluate({ live: dualEra() })).letter, "A");
+});
+
+test("MCP101 never fires for a server that has no modern surface", () => {
+  assert.ok(!ids({ live: legacyOnly() }).includes("MCP101"));
+});
+
+test("MCP101 reads as one sentence with and without a version list", () => {
+  // Caught against a live dual-era server: the versions clause ended in a full
+  // stop while being spliced mid-sentence, giving "…the current revision It
+  // names 2026-07-28 as supported. and also answers…".
+  for (const versions of [["2026-07-28"], []]) {
+    const f = evaluate({ live: dualEra({ supportedVersions: versions }) }).find(
+      (x) => x.ruleId === "MCP101",
+    );
+    assert.ok(f);
+    assert.ok(
+      !/\.\s+(and|which|that)\b/.test(f.detail),
+      `MCP101 detail has a stray full stop: ${f.detail}`,
+    );
+    assert.ok(!/\s{2,}/.test(f.detail), `MCP101 detail has a double space: ${f.detail}`);
+  }
 });
 
 test("MCP001 fires on a source match and reports file:line", () => {
@@ -66,15 +133,60 @@ test("MCP001 fires on a source match and reports file:line", () => {
   assert.equal(f.location, "src/index.ts:7");
 });
 
-test("MCP002 fires on the Mcp-Session-Id response header", () => {
-  const findings = evaluate({ live: live({ sessionIdHeaderPresent: true }) });
+test("MCP001 stays quiet when source handles per-request _meta too", () => {
+  const ctx = source("initialize");
+  ctx.matches.modernEra = [
+    { file: "src/server.ts", line: 3, text: "io.modelcontextprotocol/protocolVersion" },
+  ];
+  assert.ok(!ids({ source: ctx }).includes("MCP001"));
+});
+
+test("MCP001 never advises removing the handshake", () => {
+  // The original fix text did exactly that. It is the reason this rule was
+  // called harmful, so it is pinned.
+  const f = evaluate({ live: legacyOnly() }).find((x) => x.ruleId === "MCP001");
+  assert.ok(f);
+  assert.ok(f.fix.includes("do not remove the legacy one"));
+  assert.ok(
+    !/remove the initialize/i.test(f.fix),
+    `MCP001 must not tell a server to drop backwards compatibility: ${f.fix}`,
+  );
+});
+
+test("MCP002 fires when a session id comes back from a modern request", () => {
+  const findings = evaluate({ live: dualEra({ sessionIdOnModernRequest: true }) });
   const f = findings.find((x) => x.ruleId === "MCP002");
   assert.ok(f);
   assert.equal(f.severity, "critical");
 });
 
+test("MCP002 stays quiet when only the legacy handshake mints a session", () => {
+  const found = ids({ live: dualEra({ sessionIdOnLegacyHandshake: true }) });
+  assert.ok(!found.includes("MCP002"), "that is how the legacy revision works");
+  assert.ok(found.includes("MCP102"), "but it is worth recording");
+});
+
 test("MCP002 fires on a source sessionId match", () => {
   assert.ok(ids({ source: source("sessionId") }).includes("MCP002"));
+});
+
+test("MCP002 stays quiet on a source sessionId match beside modern handling", () => {
+  const ctx = source("sessionId");
+  ctx.matches.modernEra = [{ file: "src/server.ts", line: 3, text: "server/discover" }];
+  assert.ok(!ids({ source: ctx }).includes("MCP002"));
+});
+
+test("MCP008 fires when a modern server does not implement server/discover", () => {
+  const findings = evaluate({
+    live: dualEra({ discoverImplemented: false, modernRequestsServed: true }),
+  });
+  const f = findings.find((x) => x.ruleId === "MCP008");
+  assert.ok(f, "servers MUST implement server/discover");
+  assert.equal(f.severity, "warning");
+});
+
+test("MCP008 stays quiet for a legacy-only server — that is MCP001's finding", () => {
+  assert.ok(!ids({ live: legacyOnly() }).includes("MCP008"));
 });
 
 const CAPABILITY_RULES: Array<[string, string]> = [
@@ -98,6 +210,19 @@ for (const [capability, ruleId] of CAPABILITY_RULES) {
   test(`${ruleId} stays quiet when '${capability}' is absent`, () => {
     const other = capability === "logging" ? "tools" : "logging";
     assert.ok(!ids({ live: live({ advertisedCapabilities: [other] }) }).includes(ruleId));
+  });
+
+  test(`${ruleId} drops to an observation when '${capability}' is legacy-only`, () => {
+    // Advertised in the legacy handshake of a dual-era server: the client
+    // being served there expects it, and deprecated features stay functional
+    // through the deprecation window.
+    const findings = evaluate({
+      live: dualEra({ advertisedCapabilities: [capability], capabilitiesEra: "legacy" }),
+    });
+    const f = findings.find((x) => x.ruleId === ruleId);
+    assert.ok(f);
+    assert.equal(f.severity, "info");
+    assert.equal(gradeFrom(findings).letter, "A", "an observation costs no points");
   });
 }
 
@@ -132,6 +257,12 @@ test("MCP006 stays quiet on a source-only scan", () => {
 function withSdk(version: string | null): SourceContext {
   return { matches: {}, sdkVersion: version, filesScanned: 1 };
 }
+
+test("an info finding costs no points, so compatibility cannot lower a grade", () => {
+  const clean = gradeFrom(evaluate({ live: dualEra() }));
+  assert.equal(clean.score, 100);
+  assert.equal(clean.letter, "A");
+});
 
 test("MCP007 fires on any @modelcontextprotocol/sdk dependency", () => {
   // That package name IS the v1 line: it stops at 1.30.0 and speaks the
@@ -169,7 +300,7 @@ test("MCP007 stays quiet if the sdk package ever publishes a 2.x", () => {
 });
 
 test("MCP007 needs a checkout — a live probe cannot see package.json", () => {
-  assert.ok(!ids({ live: live({ respondsToInitialize: true }) }).includes("MCP007"));
+  assert.ok(!ids({ live: legacyOnly() }).includes("MCP007"));
 });
 
 test("no specRef relies on a page anchor", () => {
@@ -216,16 +347,19 @@ test("protocol rules cite a spec subpage, never the bare revision root", () => {
 
 test("a fired finding always carries a fix and a spec reference", () => {
   const everything = evaluate({
-    live: live({
-      respondsToInitialize: true,
-      sessionIdHeaderPresent: true,
+    live: legacyOnly({
+      sessionIdOnModernRequest: true,
       advertisedCapabilities: ["logging", "sampling", "roots"],
       authRequired: true,
     }),
     source: withSdk("^1.17.0"),
   });
 
-  assert.equal(everything.length, 7, "all seven rules should fire on this context");
+  assert.deepEqual(
+    everything.map((f) => f.ruleId).sort(),
+    ["MCP001", "MCP002", "MCP003", "MCP004", "MCP005", "MCP006", "MCP007"],
+    "every defect rule should fire on this context",
+  );
   for (const f of everything) {
     assert.ok(f.fix.length > 0, `${f.ruleId} has no fix text`);
     assert.ok(f.specRef.length > 0, `${f.ruleId} has no specRef`);

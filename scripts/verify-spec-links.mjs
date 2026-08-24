@@ -22,10 +22,15 @@ import { rules } from "../packages/core/src/rules.ts";
 
 /** specRef → a phrase that must appear on that page. */
 const MARKERS = {
-  "https://modelcontextprotocol.io/specification/2026-07-28/changelog":
-    "Remove protocol-level sessions",
   "https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http":
     "Removal of protocol-level sessions",
+  // The backwards-compatibility carve-out MCP001 and MCP101 turn on. If this
+  // sentence ever leaves the page, both rules need re-reading before the next
+  // release — it is the whole reason they are scored the way they are.
+  "https://modelcontextprotocol.io/specification/2026-07-28/basic/versioning":
+    "implement both behaviors",
+  "https://modelcontextprotocol.io/specification/2026-07-28/server/discover":
+    "DiscoverResult",
   "https://modelcontextprotocol.io/specification/2026-07-28/server/utilities/logging":
     "Logging",
   "https://modelcontextprotocol.io/specification/2026-07-28/client/sampling":

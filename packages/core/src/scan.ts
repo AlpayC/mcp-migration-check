@@ -21,6 +21,21 @@ const SIGNAL_PATTERNS: Record<string, RegExp> = {
   logging: /["']logging["']|LoggingLevel|\blogging\b\s*:\s*\{/,
   sampling: /["']sampling["']|createMessage|SamplingMessage|\bsampling\b\s*:\s*\{/,
   roots: /["']roots["']|ListRootsRequest|RootsCapability|\broots\b\s*:\s*\{/,
+  /**
+   * Evidence that the repository speaks the current revision.
+   *
+   * This is the signal that keeps a legacy match from being read as drift. A
+   * server can support both eras, and the ones that do are usually the
+   * well-maintained ones — without something to weigh against `initialize`,
+   * every dual-era codebase grades as if it had never migrated.
+   *
+   * Deliberately narrow: the `io.modelcontextprotocol/` prefix and
+   * `server/discover` only exist in `2026-07-28`, so a match is hard evidence.
+   * A dependency on the v2 SDK packages counts too — that line has no legacy
+   * mode to be confused with.
+   */
+  modernEra:
+    /io\.modelcontextprotocol\/(protocolVersion|clientCapabilities|clientInfo|serverInfo)|["']server\/discover["']|@modelcontextprotocol\/(server|client|core)\b/,
 };
 
 export interface ScanOptions {
@@ -63,28 +78,46 @@ export async function scanSource(
     }
   }
 
-  const sdkVersion = await readSdkVersion(dir);
-  return { matches, sdkVersion, filesScanned };
+  const pkg = await readPackageJson(dir);
+  // A dependency on the v2 packages is modern-era evidence even when no source
+  // line matched — a freshly generated server may not spell any of the `_meta`
+  // keys out literally.
+  for (const name of pkg.modernPackages) {
+    matches.modernEra.push({ file: "package.json", line: 0, text: name });
+  }
+
+  return { matches, sdkVersion: pkg.sdkVersion, filesScanned };
 }
 
+/** v2 ships under these names; none of them has a legacy mode. */
+const MODERN_PACKAGES = [
+  "@modelcontextprotocol/server",
+  "@modelcontextprotocol/client",
+  "@modelcontextprotocol/core",
+];
+
 /**
- * Read the declared `@modelcontextprotocol/sdk` version.
+ * Read what `package.json` says about which SDK line this project is on.
  *
- * That package name *is* the v1 line — it tops out at 1.30.0 and speaks the
- * pre-2026-07-28 protocol. The v2 SDK ships under different names entirely
- * (`@modelcontextprotocol/server`, `@modelcontextprotocol/client`), so the
- * presence of this dependency is the signal, not the number after it.
+ * `@modelcontextprotocol/sdk` *is* the v1 line — it tops out at 1.30.0 and
+ * speaks the pre-2026-07-28 protocol. The v2 SDK ships under different names
+ * entirely, so the presence of a dependency is the signal, not the number
+ * after it — in both directions.
  */
-async function readSdkVersion(dir: string): Promise<string | null> {
+async function readPackageJson(
+  dir: string,
+): Promise<{ sdkVersion: string | null; modernPackages: string[] }> {
   try {
     const raw = await fs.readFile(path.join(dir, "package.json"), "utf8");
     const pkg = JSON.parse(raw);
-    const dep =
-      pkg.dependencies?.["@modelcontextprotocol/sdk"] ??
-      pkg.devDependencies?.["@modelcontextprotocol/sdk"];
-    return typeof dep === "string" ? dep : null;
+    const deps = { ...pkg.devDependencies, ...pkg.dependencies };
+    const dep = deps["@modelcontextprotocol/sdk"];
+    return {
+      sdkVersion: typeof dep === "string" ? dep : null,
+      modernPackages: MODERN_PACKAGES.filter((name) => typeof deps[name] === "string"),
+    };
   } catch {
-    return null;
+    return { sdkVersion: null, modernPackages: [] };
   }
 }
 
