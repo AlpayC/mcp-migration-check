@@ -30,6 +30,6 @@
     "@types/react-dom": "^19.2.0",
     "postcss": "^8.5.26",
     "tailwindcss": "^4.3.3",
-    "wrangler": "^4.123.0"
+    "wrangler": "^4.125.0"
   }
 }
