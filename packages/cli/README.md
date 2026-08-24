@@ -18,13 +18,21 @@ reports, with a letter grade and per-finding fixes, what breaks. No LLM, no API
 key, nothing stored, no dependencies.
 
 ```
-Target: https://example.com/mcp  (live)
-Grade:  C (70/100)
+Target: ./my-server  (source)
+Grade:  F (0/100)
+Scanned 2 file(s).
 
-[CRITICAL] Legacy initialize handshake  (MCP001)
-  observed: server responded to `initialize`
-  fix:      remove the handshake; the stateless model has no lifecycle phase
-  spec:     https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http
+[CRITICAL] Legacy-only: the current revision is not served  (MCP001)
+  at:       src/index.ts:62
+  observed: Source implements the `initialize` lifecycle and nothing that
+            handles the modern per-request `_meta` envelope or `server/discover`.
+            As written, this server serves legacy clients only.
+  fix:      Add the modern path — do not remove the legacy one. Serve requests
+            carrying `io.modelcontextprotocol/protocolVersion` in `_meta`
+            statelessly, and implement `server/discover`. […]
+  spec:     https://modelcontextprotocol.io/specification/2026-07-28/basic/versioning
+
+  […] 4 more findings
 ```
 
 ## Usage
@@ -43,19 +51,27 @@ usable as a CI gate directly, or via the
 
 ## What it checks
 
-| Rule   | Severity | Signal                                                     |
-| ------ | -------- | ---------------------------------------------------------- |
-| MCP001 | critical | legacy `initialize` handshake (stateless model removes it)  |
-| MCP002 | critical | `Mcp-Session-Id` / session state — the classic hazard       |
-| MCP003 | warning  | deprecated `logging` capability                             |
-| MCP004 | warning  | deprecated `sampling` capability                            |
-| MCP005 | warning  | deprecated `roots` capability                               |
-| MCP006 | critical | auth without RFC 9728 protected-resource metadata           |
-| MCP007 | warning  | still on `@modelcontextprotocol/sdk` (the v1 line)          |
+| Rule   | Severity | Signal                                                              |
+| ------ | -------- | ------------------------------------------------------------------- |
+| MCP001 | critical | legacy-only: answers `initialize`, serves no modern surface         |
+| MCP002 | critical | `Mcp-Session-Id` minted for a _modern_ request — the classic hazard |
+| MCP003 | warning  | deprecated `logging` capability                                     |
+| MCP004 | warning  | deprecated `sampling` capability                                    |
+| MCP005 | warning  | deprecated `roots` capability                                       |
+| MCP006 | critical | auth without RFC 9728 protected-resource metadata                   |
+| MCP007 | warning  | still on `@modelcontextprotocol/sdk` (the v1 line)                  |
+| MCP008 | warning  | modern server that does not implement `server/discover`             |
+| MCP101 | info     | dual-era: current **and** still accepts the legacy handshake        |
+| MCP102 | info     | session ids issued to legacy clients only                           |
 
-**Seven rules are not the whole revision** — a server can pass all seven and
-still be broken. The source scan is heuristic and can over-match; the live probe
-only sees the outside. This is triage, not a conformance suite. The full list of
+**Backwards compatibility is not a finding.** The revision permits a server to
+keep answering the old handshake alongside the new surface, so the `MCP1xx`
+rules are reported for information and cost zero points. Only serving the
+legacy protocol _alone_ is graded — that is MCP001.
+
+**Ten rules are not the whole revision** — a server can pass all ten and still
+be broken. The source scan is heuristic and can over-match; the live probe only
+sees the outside. This is triage, not a conformance suite. The full list of
 limitations is in the
 [repository README](https://github.com/AlpayC/mcp-migration-check#honest-limitations).
 
@@ -66,6 +82,7 @@ agent skill for that — see
 ## Links
 
 - [Live web demo](https://mcp-migration-check.alpaycelik.workers.dev) — paste a URL, nothing to install
+- [State of MCP migration — 2026-08-23](https://github.com/AlpayC/mcp-migration-check/blob/main/reports/ecosystem-2026-08-23.md) — 13,380 registry endpoints probed
 - [Source](https://github.com/AlpayC/mcp-migration-check)
 
 MIT
