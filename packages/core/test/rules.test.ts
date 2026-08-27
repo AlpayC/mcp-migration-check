@@ -3,7 +3,13 @@ import { test } from "node:test";
 
 import { evaluate, gradeFrom } from "../src/engine";
 import { rules, rulesVerifiedAt, SPEC_VERIFIED_AT } from "../src/rules";
-import type { ProbeContext, RuleContext, SourceContext, SourceMatch } from "../src/types";
+import type {
+  ProbeContext,
+  PythonSdkRequirement,
+  RuleContext,
+  SourceContext,
+  SourceMatch,
+} from "../src/types";
 
 /**
  * Rules are pure functions over a normalized context — no network, no disk.
@@ -61,6 +67,8 @@ function source(signal: string, match: Partial<SourceMatch> = {}): SourceContext
     logging: [],
     sampling: [],
     roots: [],
+    pythonV1Sdk: [],
+    pythonServerSdk: [],
     modernEra: [],
   };
   return {
@@ -258,6 +266,19 @@ function withSdk(version: string | null): SourceContext {
   return { matches: {}, sdkVersion: version, filesScanned: 1 };
 }
 
+function pythonRequirement(
+  sdkLine: PythonSdkRequirement["sdkLine"],
+  specifier: string,
+): PythonSdkRequirement {
+  return {
+    file: "pyproject.toml",
+    line: 8,
+    requirement: `mcp${specifier}`,
+    specifier,
+    sdkLine,
+  };
+}
+
 test("an info finding costs no points, so compatibility cannot lower a grade", () => {
   const clean = gradeFrom(evaluate({ live: dualEra() }));
   assert.equal(clean.score, 100);
@@ -303,6 +324,63 @@ test("MCP007 needs a checkout — a live probe cannot see package.json", () => {
   assert.ok(!ids({ live: legacyOnly() }).includes("MCP007"));
 });
 
+test("MCP009 fires when Python project metadata only permits SDK v1", () => {
+  const ctx = withSdk(null);
+  ctx.pythonSdkRequirements = [pythonRequirement("legacy", ">=1.28,<2")];
+  const f = evaluate({ source: ctx }).find((finding) => finding.ruleId === "MCP009");
+  assert.ok(f);
+  assert.equal(f.location, "pyproject.toml:8");
+  assert.ok(f.detail.includes("mcp>=1.28,<2"));
+});
+
+test("MCP009 fires on the official Python SDK's v1 FastMCP import", () => {
+  const ctx = source("pythonV1Sdk", {
+    file: "server.py",
+    line: 2,
+    text: "from mcp.server.fastmcp import FastMCP",
+  });
+  const found = ids({ source: ctx });
+  assert.ok(found.includes("MCP009"));
+  assert.ok(found.includes("MCP001"), "the v1 server import is legacy-server evidence");
+});
+
+test("a low-level Python server constrained to SDK v1 fires MCP001", () => {
+  const ctx = source("pythonServerSdk", {
+    file: "server.py",
+    line: 1,
+    text: "from mcp.server.lowlevel import Server",
+  });
+  ctx.pythonSdkRequirements = [pythonRequirement("legacy", "<2")];
+  const found = ids({ source: ctx });
+  assert.ok(found.includes("MCP001"));
+  assert.ok(found.includes("MCP009"));
+});
+
+test("MCP009 stays quiet for Python SDK v2 and ambiguous constraints", () => {
+  for (const requirement of [
+    pythonRequirement("modern", ">=2,<3"),
+    pythonRequirement("unknown", ">=1.28"),
+    pythonRequirement("unknown", ""),
+  ]) {
+    const ctx = withSdk(null);
+    ctx.pythonSdkRequirements = [requirement];
+    assert.ok(!ids({ source: ctx }).includes("MCP009"), requirement.requirement);
+  }
+});
+
+test("MCP009 points to the official Python migration and class rename", () => {
+  const ctx = withSdk(null);
+  ctx.pythonSdkRequirements = [pythonRequirement("legacy", "<2")];
+  const f = evaluate({ source: ctx }).find((finding) => finding.ruleId === "MCP009");
+  assert.ok(f);
+  assert.ok(f.fix.includes("from mcp.server import MCPServer"));
+  assert.equal(f.specRef, "https://py.sdk.modelcontextprotocol.io/migration/");
+});
+
+test("MCP009 needs a checkout — a live probe cannot see Python metadata", () => {
+  assert.ok(!ids({ live: legacyOnly() }).includes("MCP009"));
+});
+
 test("no specRef relies on a page anchor", () => {
   // Regression guard: these used to be `…/2026-07-28#lifecycle` and friends,
   // which silently resolved to the overview page with a fragment that does not
@@ -337,7 +415,7 @@ test("rulesVerifiedAt reports the oldest citation, not the newest", () => {
 test("protocol rules cite a spec subpage, never the bare revision root", () => {
   const root = "https://modelcontextprotocol.io/specification/2026-07-28";
   for (const rule of rules) {
-    if (!rule.specRef.startsWith(root)) continue; // MCP007 cites the SDK blog
+    if (!rule.specRef.startsWith(root)) continue; // SDK rules cite their release/migration docs
     assert.ok(
       rule.specRef.startsWith(`${root}/`) && rule.specRef.length > root.length + 1,
       `${rule.id} must cite a subpage under ${root}/, got ${rule.specRef}`,
@@ -346,18 +424,29 @@ test("protocol rules cite a spec subpage, never the bare revision root", () => {
 });
 
 test("a fired finding always carries a fix and a spec reference", () => {
+  const sourceContext = withSdk("^1.17.0");
+  sourceContext.pythonSdkRequirements = [pythonRequirement("legacy", "<2")];
   const everything = evaluate({
     live: legacyOnly({
       sessionIdOnModernRequest: true,
       advertisedCapabilities: ["logging", "sampling", "roots"],
       authRequired: true,
     }),
-    source: withSdk("^1.17.0"),
+    source: sourceContext,
   });
 
   assert.deepEqual(
     everything.map((f) => f.ruleId).sort(),
-    ["MCP001", "MCP002", "MCP003", "MCP004", "MCP005", "MCP006", "MCP007"],
+    [
+      "MCP001",
+      "MCP002",
+      "MCP003",
+      "MCP004",
+      "MCP005",
+      "MCP006",
+      "MCP007",
+      "MCP009",
+    ],
     "every defect rule should fire on this context",
   );
   for (const f of everything) {

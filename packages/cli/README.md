@@ -61,6 +61,7 @@ usable as a CI gate directly, or via the
 | MCP006 | critical | auth without RFC 9728 protected-resource metadata                   |
 | MCP007 | warning  | still on `@modelcontextprotocol/sdk` (the v1 line)                  |
 | MCP008 | warning  | modern server that does not implement `server/discover`             |
+| MCP009 | warning  | Python `mcp` constrained to 1.x or importing the v1 `FastMCP` API   |
 | MCP101 | info     | dual-era: current **and** still accepts the legacy handshake        |
 | MCP102 | info     | session ids issued to legacy clients only                           |
 
@@ -69,7 +70,7 @@ keep answering the old handshake alongside the new surface, so the `MCP1xx`
 rules are reported for information and cost zero points. Only serving the
 legacy protocol _alone_ is graded — that is MCP001.
 
-**Ten rules are not the whole revision** — a server can pass all ten and still
+**Eleven rules are not the whole revision** — a server can pass all eleven and still
 be broken. The source scan is heuristic and can over-match; the live probe only
 sees the outside. This is triage, not a conformance suite. The full list of
 limitations is in the

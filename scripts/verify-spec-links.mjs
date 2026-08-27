@@ -41,6 +41,8 @@ const MARKERS = {
     "OAuth 2.1 resource server",
   "https://blog.modelcontextprotocol.io/posts/sdk-betas-2026-07-28/":
     "2026-07-28",
+  "https://py.sdk.modelcontextprotocol.io/migration/":
+    "Migration Guide: v1 to v2",
 };
 
 const TIMEOUT_MS = 20_000;

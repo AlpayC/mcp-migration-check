@@ -11,6 +11,7 @@ saw, how to tell a real hazard from noise, and the shape of the fix.
 - [MCP006 — Missing OAuth 2.1 resource-server posture](#mcp006--missing-oauth-21-resource-server-posture)
 - [MCP007 — TypeScript SDK still on the v1 line](#mcp007--typescript-sdk-still-on-the-v1-line)
 - [MCP008 — `server/discover` not implemented](#mcp008--serverdiscover-not-implemented)
+- [MCP009 — Python SDK still on the v1 line](#mcp009--python-sdk-still-on-the-v1-line)
 - [MCP101 / MCP102 — compatibility observations](#mcp101--mcp102--compatibility-observations)
 
 Verify exact signatures and header names against the
@@ -37,7 +38,9 @@ request **and** nothing modern answered — `server/discover` returned no result
 and a request carrying per-request `_meta` was not served as one. Source: the
 code implements the `initialize` lifecycle and contains no handling of the
 modern `_meta` envelope, no `server/discover`, and no dependency on the v2 SDK
-packages.
+packages. For Python, importing the official v1-only
+`mcp.server.fastmcp` server API is equivalent evidence; a general
+`mcp.server` import also counts when project metadata constrains `mcp` to 1.x.
 
 **What does *not* trigger it: still answering `initialize`.** This is the
 important half. The revision explicitly allows a server to serve both eras:
@@ -298,10 +301,10 @@ the v1 SDK, both lines end up in the tree and the failure looks like a type
 mismatch between things that appear identical. Check the lockfile, not just
 `package.json`.
 
-**Non-TypeScript servers.** This rule only reads `package.json`, so it is silent
-for other languages — but they moved too, and differently: Python and C# to 2.x
-majors, Go to a 1.x minor. Check the actual package rather than assuming the
-TypeScript story applies.
+**Other languages.** Python has its own SDK rule, MCP009, because its v2
+migration keeps the `mcp` package name. C# and Go are still not dependency-
+checked; inspect their actual SDK constraints rather than applying the
+TypeScript package-rename story.
 
 ---
 
@@ -332,6 +335,63 @@ on stdio, the only way a dual-era client can tell the two eras apart.
 
 List every version you actually serve. A dual-era server names only its modern
 versions here — legacy clients never call this method.
+
+---
+
+## MCP009 — Python SDK still on the v1 line
+
+**Severity:** warning
+
+**What triggered it.** The source scan found either:
+
+- a direct `mcp` dependency that can only resolve to 1.x, such as
+  `mcp[cli]>=1.28,<2`, in `pyproject.toml`, a requirements file, `Pipfile`, or
+  `setup.cfg`; or
+- an import from `mcp.server.fastmcp`, the official v1 high-level server API.
+
+The scanner classifies only constraints that force one side of the major
+boundary. An unconstrained `mcp`, `mcp>=1.28`, a direct URL, or an alternative
+constraint stays unknown unless the old import supplies the missing evidence.
+That is deliberate: a manifest is not a lockfile, and guessing the installed
+major would turn a warning into fiction.
+
+**Why the package name is not enough.** Unlike TypeScript, Python kept the same
+distribution name. `mcp` 1.x is the maintenance line; `mcp` 2.x is the current
+stable line and implements the 2026-07-28 revision while continuing to serve
+legacy clients. The major constraint and API surface distinguish them.
+
+**The fix.** Move the dependency to 2.x, for example:
+
+```toml
+[project]
+dependencies = ["mcp[cli]>=2,<3"]
+```
+
+Then follow the [official Python v1-to-v2 migration
+guide](https://py.sdk.modelcontextprotocol.io/migration/). The first high-level
+server change is:
+
+```python
+# v1
+from mcp.server.fastmcp import FastMCP
+mcp = FastMCP("demo")
+
+# v2
+from mcp.server import MCPServer
+mcp = MCPServer("demo")
+```
+
+Do not stop at the import. Protocol fields become snake_case Python
+attributes, transport settings move from the constructor to `run()` or the app
+builder, low-level handler registration changes, and inbound/outbound traffic
+is validated more strictly. Search the migration guide for every symbol the
+server imports, then run its tests against SDK 2.x.
+
+**Telling real from noise.** The import signal is intentionally limited to the
+official `mcp.server.fastmcp` path. A project using the separate third-party
+`fastmcp` distribution does not match it. A legacy constraint in a nested
+example or test project can still be intentional; use the reported
+`file:line` to decide whether that project ships the server under review.
 
 ---
 

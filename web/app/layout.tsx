@@ -6,7 +6,7 @@ import "./globals.css";
 export const metadata: Metadata = {
   title: "MCP Migration Check · 2026-07-28 readiness",
   description:
-    "Paste an MCP endpoint and see whether it survives the 2026-07-28 spec break — stateless model, OAuth 2.1, deprecated features. Deterministic, no data stored.",
+    "Check a live MCP endpoint or scan a TypeScript or Python server for the 2026-07-28 spec break — deterministic, no data stored.",
 };
 
 export default function RootLayout({

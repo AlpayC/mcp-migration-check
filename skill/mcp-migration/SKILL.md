@@ -5,7 +5,7 @@ description: Diagnose and carry out the migration of an MCP server to the 2026-0
 
 # MCP 2026-07-28 migration
 
-The 2026-07-28 revision is a refactor, not a version bump. Four things this
+The 2026-07-28 revision is a refactor, not a version bump. Five things this
 checker looks for break existing servers:
 
 1. **The transport is stateless.** The `initialize`/`notifications/initialized`
@@ -26,6 +26,9 @@ checker looks for break existing servers:
    `@modelcontextprotocol/sdk` is the v1 line and stops at 1.30.0. v2 ships as
    `@modelcontextprotocol/server` + `@modelcontextprotocol/client` (plus
    `/core` and an `/express`, `/fastify` or `/hono` adapter).
+5. **The Python SDK moved to v2 under the same package name.** The official
+   PyPI package remains `mcp`, while `mcp.server.fastmcp.FastMCP` becomes
+   `mcp.server.MCPServer`. A `<2` constraint or the old import is a v1 signal.
 
 The revision changed more than the checker covers: `server/discover` is now
 mandatory, all results carry a required `resultType`, the GET stream and
@@ -43,8 +46,8 @@ above. There *is* an official codemod, and it is a separate package:
 npx @modelcontextprotocol/codemod@latest v1-to-v2 .
 ```
 
-The other Tier 1 SDKs moved differently: Python and C# to 2.x majors, Go to a
-1.x minor. Check the actual package before advising a version.
+The other Tier 1 SDKs moved differently: C# to a 2.x major, Go to a 1.x minor.
+Check the actual package before advising a version.
 
 Work in this order: diagnose, triage, remediate, re-verify. The diagnosis step
 is scripted so it gives the same answer every time — resist the urge to skip it
@@ -74,8 +77,8 @@ running. They see different things and neither is a superset of the other:
 
 | | Source scan | Live probe |
 |---|---|---|
-| Sees | the code, `package.json`, `file:line` | both protocol eras, headers, advertised capabilities, OAuth posture |
-| Finds | MCP001–005, **MCP007** (SDK line) | MCP001–006, **MCP008**, MCP101/102 |
+| Sees | code, `package.json`, Python manifests, `file:line` | both protocol eras, headers, advertised capabilities, OAuth posture |
+| Finds | MCP001–005, **MCP007/MCP009** (SDK lines) | MCP001–006, **MCP008**, MCP101/102 |
 | Needs | a checkout | a reachable endpoint |
 
 Exit codes: `0` no critical findings · `1` at least one critical · `2`
@@ -115,11 +118,12 @@ it end to end.
 Sequence matters. Do it in this order, because later steps depend on earlier
 ones:
 
-1. **MCP007 first** — move to the v2 packages and run the codemod. Doing this
-   before the code changes means you refactor against the API you are going to
-   keep, instead of refactoring twice. The codemod handles renames, not
-   architecture; the type errors it leaves behind point straight at the MCP002
-   work.
+1. **The SDK finding first** — MCP007 for TypeScript, MCP009 for Python. Doing
+   this before the code changes means you refactor against the API you are
+   going to keep, instead of refactoring twice. For MCP007, move to the v2
+   packages and run the TypeScript codemod. For MCP009, move `mcp` to 2.x and
+   follow the official Python migration guide (`FastMCP` → `MCPServer` is the
+   first import change). The remaining errors point at the architectural work.
 2. **MCP002 (session state)** — the deepest change, and the one most likely to
    surface hidden design assumptions.
 3. **MCP001 (legacy-only)** — add the modern request path and

@@ -39,6 +39,7 @@ const SPEC = {
   // The spec site has no SDK section — SDK releases are announced separately.
   // This is the document that states which SDK line speaks which revision.
   sdk: "https://blog.modelcontextprotocol.io/posts/sdk-betas-2026-07-28/",
+  pythonSdk: "https://py.sdk.modelcontextprotocol.io/migration/",
 } as const;
 
 /**
@@ -65,6 +66,8 @@ export const SPEC_VERIFIED_AT: Record<string, string> = {
   [SPEC.discover]: "2026-08-23",
   // Checked against npm the following day, when the rename turned up.
   [SPEC.sdk]: "2026-08-02",
+  // Official v1-to-v2 guide: package constraint, import, and class rename.
+  [SPEC.pythonSdk]: "2026-08-27",
 };
 
 /** The oldest citation date — what a report should quote, not the newest. */
@@ -115,7 +118,15 @@ export const rules: Rule[] = [
       if (servesModern(ctx)) return null;
 
       const live = ctx.live?.respondsToLegacyInitialize;
-      const src = firstMatch(ctx, "initialize");
+      const v1PythonApi = firstMatch(ctx, "pythonV1Sdk");
+      const v1PythonRequirement = ctx.source?.pythonSdkRequirements?.some(
+        (candidate) => candidate.sdkLine === "legacy",
+      );
+      const constrainedPythonServer = v1PythonRequirement
+        ? firstMatch(ctx, "pythonServerSdk")
+        : undefined;
+      const legacyPythonServer = v1PythonApi ?? constrainedPythonServer;
+      const src = firstMatch(ctx, "initialize") ?? legacyPythonServer;
       if (!live && !src) return null;
 
       const negotiated = ctx.live?.legacyProtocolVersion;
@@ -127,8 +138,15 @@ export const rules: Rule[] = [
           ? `The server answered the legacy \`initialize\` handshake${
               negotiated ? ` (negotiating ${negotiated})` : ""
             } and showed no sign of the modern surface: \`server/discover\` did not answer, and a request carrying per-request \`_meta\` was not served as one. A modern client cannot talk to it at all.`
-          : "Source implements the `initialize` lifecycle and nothing that handles the modern per-request `_meta` envelope or `server/discover`. As written, this server serves legacy clients only.",
-        fix: "Add the modern path — do not remove the legacy one. Serve requests carrying `io.modelcontextprotocol/protocolVersion` in `_meta` statelessly, and implement `server/discover`. A dual-era server MAY keep answering `initialize` on the same endpoint; that is how v1 clients keep working, and deleting the handshake would break every one of them.",
+          : legacyPythonServer && src === legacyPythonServer
+            ? v1PythonApi
+              ? "Source imports the official Python SDK's v1-only `mcp.server.fastmcp` server API and shows no modern SDK or protocol surface. That server line cannot serve a 2026-07-28 client."
+              : "Source imports the official Python server SDK while project metadata constrains `mcp` to 1.x, and it shows no modern protocol surface. That server cannot serve a 2026-07-28 client."
+            : "Source implements the `initialize` lifecycle and nothing that handles the modern per-request `_meta` envelope or `server/discover`. As written, this server serves legacy clients only.",
+        fix:
+          legacyPythonServer && src === legacyPythonServer
+            ? "Upgrade the official Python `mcp` dependency to 2.x and migrate `FastMCP` to `MCPServer`. Python SDK v2 serves the modern revision and legacy clients concurrently; do not delete backwards compatibility by hand."
+            : "Add the modern path — do not remove the legacy one. Serve requests carrying `io.modelcontextprotocol/protocolVersion` in `_meta` statelessly, and implement `server/discover`. A dual-era server MAY keep answering `initialize` on the same endpoint; that is how v1 clients keep working, and deleting the handshake would break every one of them.",
         specRef: SPEC.versioning,
         location: live ? "live endpoint" : loc(src),
       };
@@ -190,7 +208,7 @@ export const rules: Rule[] = [
       specRef: SPEC.sampling,
       fix: "Remove reliance on server-initiated sampling. Integrate directly with an LLM provider API, or return the raw material and let the client decide whether a model call is needed.",
       sourceDetail:
-        "Source references the deprecated `sampling` capability (createMessage).",
+        "Source references the deprecated `sampling` capability (createMessage/create_message).",
     }),
   },
   {
@@ -273,6 +291,40 @@ export const rules: Rule[] = [
         fix: "Implement `server/discover`, returning `supportedVersions`, `capabilities` and `_meta['io.modelcontextprotocol/serverInfo']`.",
         specRef: SPEC.discover,
         location: "live endpoint",
+      };
+    },
+  },
+  {
+    id: "MCP009",
+    title: "Python SDK still on the v1 line",
+    severity: "warning",
+    specRef: SPEC.pythonSdk,
+    evaluate(ctx): Finding | null {
+      const requirement = ctx.source?.pythonSdkRequirements?.find(
+        (candidate) => candidate.sdkLine === "legacy",
+      );
+      const legacyApi = firstMatch(ctx, "pythonV1Sdk");
+      if (!requirement && !legacyApi) return null;
+
+      const requirementDetail = requirement
+        ? `${requirement.file} declares \`${requirement.requirement}\`, a constraint that can only install the 1.x maintenance line.`
+        : null;
+      const apiDetail = legacyApi
+        ? "Source imports `mcp.server.fastmcp`, the v1 high-level server API (`FastMCP`)."
+        : null;
+
+      return {
+        ruleId: "MCP009",
+        title: "Python SDK still on the v1 line",
+        severity: "warning",
+        detail: [requirementDetail, apiDetail, "Python SDK v2 is the current line and implements the 2026-07-28 protocol revision."]
+          .filter(Boolean)
+          .join(" "),
+        fix: "Move the official `mcp` dependency to 2.x (for example `mcp>=2,<3`) and follow the Python SDK migration guide. For a high-level server, replace `from mcp.server.fastmcp import FastMCP` with `from mcp.server import MCPServer`, then migrate the remaining v2 API changes and run the server's tests.",
+        specRef: SPEC.pythonSdk,
+        location: requirement
+          ? `${requirement.file}:${requirement.line}`
+          : loc(legacyApi),
       };
     },
   },
