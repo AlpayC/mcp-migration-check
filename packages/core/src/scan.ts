@@ -53,7 +53,7 @@ const SIGNAL_PATTERNS: Record<string, RegExp> = {
     /\bfrom\s+mcp\.server\.fastmcp(?:\.[A-Za-z_][\w.]*)?\s+import\b|\bimport\s+mcp\.server\.fastmcp\b/,
   /** Any official Python SDK server import; its major comes from metadata. */
   pythonServerSdk:
-    /\bfrom\s+mcp\.server(?:\.[A-Za-z_][\w.]*)*\s+import\b|\bimport\s+mcp\.server(?:\.[A-Za-z_][\w.]*)*\b/,
+    /\bfrom\s+mcp\.server(?:\.[A-Za-z_]\w*)*\s+import\b|\bimport\s+mcp\.server(?:\.[A-Za-z_]\w*)*\b/,
   /**
    * Evidence that the repository speaks the current revision.
    *

@@ -602,7 +602,7 @@ var SIGNAL_PATTERNS = {
   /** The official Python SDK's v1 high-level server import. */
   pythonV1Sdk: /\bfrom\s+mcp\.server\.fastmcp(?:\.[A-Za-z_][\w.]*)?\s+import\b|\bimport\s+mcp\.server\.fastmcp\b/,
   /** Any official Python SDK server import; its major comes from metadata. */
-  pythonServerSdk: /\bfrom\s+mcp\.server(?:\.[A-Za-z_][\w.]*)*\s+import\b|\bimport\s+mcp\.server(?:\.[A-Za-z_][\w.]*)*\b/,
+  pythonServerSdk: /\bfrom\s+mcp\.server(?:\.[A-Za-z_]\w*)*\s+import\b|\bimport\s+mcp\.server(?:\.[A-Za-z_]\w*)*\b/,
   /**
    * Evidence that the repository speaks the current revision.
    *
