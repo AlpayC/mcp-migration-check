@@ -832,8 +832,9 @@ function renderMarkdown({ probed, summary, entries, localOnly, startedAt, dateSt
       "which is a coarser question than *cared for*.",
   );
   out.push(
-    "- **A live probe sees every rule but one.** MCP007 reads a `package.json`, " +
-      "which a probe does not have.",
+    "- **A live probe cannot see SDK dependency rules.** MCP007 reads a " +
+      "`package.json`; MCP009 reads Python project metadata or source. A probe " +
+      "has neither.",
   );
   out.push(
     "- **These rules are not the whole revision.** A server can pass every rule " +

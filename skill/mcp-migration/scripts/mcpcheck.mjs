@@ -12,7 +12,8 @@ var SPEC = {
   authorization: `${SPEC_BASE}/basic/authorization`,
   // The spec site has no SDK section — SDK releases are announced separately.
   // This is the document that states which SDK line speaks which revision.
-  sdk: "https://blog.modelcontextprotocol.io/posts/sdk-betas-2026-07-28/"
+  sdk: "https://blog.modelcontextprotocol.io/posts/sdk-betas-2026-07-28/",
+  pythonSdk: "https://py.sdk.modelcontextprotocol.io/migration/"
 };
 var SPEC_VERIFIED_AT = {
   [SPEC.transport]: "2026-08-23",
@@ -24,7 +25,9 @@ var SPEC_VERIFIED_AT = {
   [SPEC.versioning]: "2026-08-23",
   [SPEC.discover]: "2026-08-23",
   // Checked against npm the following day, when the rename turned up.
-  [SPEC.sdk]: "2026-08-02"
+  [SPEC.sdk]: "2026-08-02",
+  // Official v1-to-v2 guide: package constraint, import, and class rename.
+  [SPEC.pythonSdk]: "2026-08-27"
 };
 var rulesVerifiedAt = Object.values(SPEC_VERIFIED_AT).sort()[0];
 function firstMatch(ctx, signal) {
@@ -50,15 +53,21 @@ var rules = [
     evaluate(ctx) {
       if (servesModern(ctx)) return null;
       const live = ctx.live?.respondsToLegacyInitialize;
-      const src = firstMatch(ctx, "initialize");
+      const v1PythonApi = firstMatch(ctx, "pythonV1Sdk");
+      const v1PythonRequirement = ctx.source?.pythonSdkRequirements?.some(
+        (candidate) => candidate.sdkLine === "legacy"
+      );
+      const constrainedPythonServer = v1PythonRequirement ? firstMatch(ctx, "pythonServerSdk") : void 0;
+      const legacyPythonServer = v1PythonApi ?? constrainedPythonServer;
+      const src = firstMatch(ctx, "initialize") ?? legacyPythonServer;
       if (!live && !src) return null;
       const negotiated = ctx.live?.legacyProtocolVersion;
       return {
         ruleId: "MCP001",
         title: "Legacy-only: the current revision is not served",
         severity: "critical",
-        detail: live ? `The server answered the legacy \`initialize\` handshake${negotiated ? ` (negotiating ${negotiated})` : ""} and showed no sign of the modern surface: \`server/discover\` did not answer, and a request carrying per-request \`_meta\` was not served as one. A modern client cannot talk to it at all.` : "Source implements the `initialize` lifecycle and nothing that handles the modern per-request `_meta` envelope or `server/discover`. As written, this server serves legacy clients only.",
-        fix: "Add the modern path \u2014 do not remove the legacy one. Serve requests carrying `io.modelcontextprotocol/protocolVersion` in `_meta` statelessly, and implement `server/discover`. A dual-era server MAY keep answering `initialize` on the same endpoint; that is how v1 clients keep working, and deleting the handshake would break every one of them.",
+        detail: live ? `The server answered the legacy \`initialize\` handshake${negotiated ? ` (negotiating ${negotiated})` : ""} and showed no sign of the modern surface: \`server/discover\` did not answer, and a request carrying per-request \`_meta\` was not served as one. A modern client cannot talk to it at all.` : legacyPythonServer && src === legacyPythonServer ? v1PythonApi ? "Source imports the official Python SDK's v1-only `mcp.server.fastmcp` server API and shows no modern SDK or protocol surface. That server line cannot serve a 2026-07-28 client." : "Source imports the official Python server SDK while project metadata constrains `mcp` to 1.x, and it shows no modern protocol surface. That server cannot serve a 2026-07-28 client." : "Source implements the `initialize` lifecycle and nothing that handles the modern per-request `_meta` envelope or `server/discover`. As written, this server serves legacy clients only.",
+        fix: legacyPythonServer && src === legacyPythonServer ? "Upgrade the official Python `mcp` dependency to 2.x and migrate `FastMCP` to `MCPServer`. Python SDK v2 serves the modern revision and legacy clients concurrently; do not delete backwards compatibility by hand." : "Add the modern path \u2014 do not remove the legacy one. Serve requests carrying `io.modelcontextprotocol/protocolVersion` in `_meta` statelessly, and implement `server/discover`. A dual-era server MAY keep answering `initialize` on the same endpoint; that is how v1 clients keep working, and deleting the handshake would break every one of them.",
         specRef: SPEC.versioning,
         location: live ? "live endpoint" : loc(src)
       };
@@ -109,7 +118,7 @@ var rules = [
       title: "Deprecated sampling capability",
       specRef: SPEC.sampling,
       fix: "Remove reliance on server-initiated sampling. Integrate directly with an LLM provider API, or return the raw material and let the client decide whether a model call is needed.",
-      sourceDetail: "Source references the deprecated `sampling` capability (createMessage)."
+      sourceDetail: "Source references the deprecated `sampling` capability (createMessage/create_message)."
     })
   },
   {
@@ -184,6 +193,30 @@ var rules = [
         fix: "Implement `server/discover`, returning `supportedVersions`, `capabilities` and `_meta['io.modelcontextprotocol/serverInfo']`.",
         specRef: SPEC.discover,
         location: "live endpoint"
+      };
+    }
+  },
+  {
+    id: "MCP009",
+    title: "Python SDK still on the v1 line",
+    severity: "warning",
+    specRef: SPEC.pythonSdk,
+    evaluate(ctx) {
+      const requirement = ctx.source?.pythonSdkRequirements?.find(
+        (candidate) => candidate.sdkLine === "legacy"
+      );
+      const legacyApi = firstMatch(ctx, "pythonV1Sdk");
+      if (!requirement && !legacyApi) return null;
+      const requirementDetail = requirement ? `${requirement.file} declares \`${requirement.requirement}\`, a constraint that can only install the 1.x maintenance line.` : null;
+      const apiDetail = legacyApi ? "Source imports `mcp.server.fastmcp`, the v1 high-level server API (`FastMCP`)." : null;
+      return {
+        ruleId: "MCP009",
+        title: "Python SDK still on the v1 line",
+        severity: "warning",
+        detail: [requirementDetail, apiDetail, "Python SDK v2 is the current line and implements the 2026-07-28 protocol revision."].filter(Boolean).join(" "),
+        fix: "Move the official `mcp` dependency to 2.x (for example `mcp>=2,<3`) and follow the Python SDK migration guide. For a high-level server, replace `from mcp.server.fastmcp import FastMCP` with `from mcp.server import MCPServer`, then migrate the remaining v2 API changes and run the server's tests.",
+        specRef: SPEC.pythonSdk,
+        location: requirement ? `${requirement.file}:${requirement.line}` : loc(legacyApi)
       };
     }
   },
@@ -541,13 +574,35 @@ function advertisedMetadataUrl(header) {
 import { promises as fs } from "node:fs";
 import path from "node:path";
 var SCANNABLE = /* @__PURE__ */ new Set([".ts", ".tsx", ".js", ".mjs", ".cjs", ".py", ".go"]);
-var IGNORED_DIRS = /* @__PURE__ */ new Set(["node_modules", ".git", "dist", ".next", "out", "build"]);
+var IGNORED_DIRS = /* @__PURE__ */ new Set([
+  "node_modules",
+  ".git",
+  "dist",
+  ".next",
+  "out",
+  "build",
+  // Python environments and tool caches can contain tens of thousands of
+  // third-party files. Scanning them both exhausts the file cap and reports
+  // the SDK's own compatibility code as if it belonged to the project.
+  ".venv",
+  "venv",
+  "env",
+  "__pycache__",
+  ".mypy_cache",
+  ".pytest_cache",
+  ".ruff_cache",
+  ".tox"
+]);
 var SIGNAL_PATTERNS = {
   initialize: /InitializeRequest|oninitialized|["']initialize["']|["']initialized["']/,
-  sessionId: /[Mm]cp-[Ss]ession-[Ii]d|mcpSessionId|\bsessionId\b/,
-  logging: /["']logging["']|LoggingLevel|\blogging\b\s*:\s*\{/,
-  sampling: /["']sampling["']|createMessage|SamplingMessage|\bsampling\b\s*:\s*\{/,
-  roots: /["']roots["']|ListRootsRequest|RootsCapability|\broots\b\s*:\s*\{/,
+  sessionId: /[Mm]cp-[Ss]ession-[Ii]d|mcpSessionId|mcp_session_id|get_session_id|session_id_generator|stateless_http\s*=\s*False|\bsessionId\b/,
+  logging: /["']logging["']|LoggingLevel|LoggingMessageNotification|send_log_message|\b(?:ctx|context)\.(?:debug|info|warning|error|critical|log)\s*\(|\blogging\b\s*:\s*\{/,
+  sampling: /["']sampling["']|createMessage|create_message|SamplingMessage|\bsampling\b\s*:\s*\{/,
+  roots: /["']roots["']|ListRootsRequest|RootsCapability|list_roots|\broots\b\s*:\s*\{/,
+  /** The official Python SDK's v1 high-level server import. */
+  pythonV1Sdk: /\bfrom\s+mcp\.server\.fastmcp(?:\.[A-Za-z_][\w.]*)?\s+import\b|\bimport\s+mcp\.server\.fastmcp\b/,
+  /** Any official Python SDK server import; its major comes from metadata. */
+  pythonServerSdk: /\bfrom\s+mcp\.server(?:\.[A-Za-z_][\w.]*)*\s+import\b|\bimport\s+mcp\.server(?:\.[A-Za-z_][\w.]*)*\b/,
   /**
    * Evidence that the repository speaks the current revision.
    *
@@ -561,7 +616,7 @@ var SIGNAL_PATTERNS = {
    * A dependency on the v2 SDK packages counts too — that line has no legacy
    * mode to be confused with.
    */
-  modernEra: /io\.modelcontextprotocol\/(protocolVersion|clientCapabilities|clientInfo|serverInfo)|["']server\/discover["']|@modelcontextprotocol\/(server|client|core)\b/
+  modernEra: /io\.modelcontextprotocol\/(protocolVersion|clientCapabilities|clientInfo|serverInfo)|["']server\/discover["']|@modelcontextprotocol\/(server|client|core)\b|\bfrom\s+mcp\.server\s+import\s+[^#\n]*\bMCPServer\b|\bfrom\s+mcp\.server\.mcpserver(?:\.[A-Za-z_][\w.]*)?\s+import\b/
 };
 async function scanSource(dir, opts = {}) {
   const maxFiles = opts.maxFiles ?? 5e3;
@@ -592,7 +647,199 @@ async function scanSource(dir, opts = {}) {
   for (const name of pkg.modernPackages) {
     matches.modernEra.push({ file: "package.json", line: 0, text: name });
   }
-  return { matches, sdkVersion: pkg.sdkVersion, filesScanned };
+  const pythonSdkRequirements = await readPythonSdkRequirements(dir, maxBytes, maxFiles);
+  for (const req of pythonSdkRequirements) {
+    if (req.sdkLine !== "modern") continue;
+    matches.modernEra.push({
+      file: req.file,
+      line: req.line,
+      text: req.requirement
+    });
+  }
+  return { matches, sdkVersion: pkg.sdkVersion, pythonSdkRequirements, filesScanned };
+}
+function classifyPythonSdkSpecifier(specifier) {
+  const value = specifier.trim().replace(/^(["'])(.*)\1$/, "$2").trim();
+  if (!value || value === "*" || value.includes("||") || /^@|^(git|https?|file):/i.test(value)) {
+    return "unknown";
+  }
+  const singleMajor = value.match(/^(?:\^|~=|~)?\s*[vV]?(\d+)(?:\.\d+)*(?:\.\*)?(?:[a-z]+\d*)?$/i);
+  if (singleMajor) return Number(singleMajor[1]) >= 2 ? "modern" : "legacy";
+  const clauses = value.split(",").map((part) => part.trim()).filter(Boolean);
+  for (const clause of clauses) {
+    const exact = clause.match(/^(?:===|==)\s*[vV]?(\d+)(?:\.\d+)*(?:\.\*)?(?:[a-z]+\d*)?$/i);
+    if (exact) return Number(exact[1]) >= 2 ? "modern" : "legacy";
+    const compatible = clause.match(/^(?:~=|\^|~)\s*[vV]?(\d+)/);
+    if (compatible) return Number(compatible[1]) >= 2 ? "modern" : "legacy";
+  }
+  for (const clause of clauses) {
+    const upper = clause.match(/^(<|<=)\s*[vV]?(\d+)(?:\.(\d+))?/);
+    if (!upper) continue;
+    const major = Number(upper[2]);
+    if (major < 2 || major === 2 && upper[1] === "<" && Number(upper[3] ?? 0) === 0) {
+      return "legacy";
+    }
+  }
+  for (const clause of clauses) {
+    const lower = clause.match(/^>=\s*[vV]?(\d+)/);
+    if (lower && Number(lower[1]) >= 2) return "modern";
+  }
+  return "unknown";
+}
+function parsePythonSdkRequirements(file, content) {
+  const name = path.basename(file).toLowerCase();
+  if (name === "pyproject.toml") return parsePyproject(file, content);
+  if (name === "pipfile") return parsePipfile(file, content);
+  if (name === "setup.cfg") return parseSetupCfg(file, content);
+  if (/^requirements(?:[-_.].*)?\.(?:txt|in)$/.test(name)) {
+    return parseRequirementsFile(file, content);
+  }
+  return [];
+}
+function parsePyproject(file, content) {
+  const found = [];
+  const lines = content.split(/\r?\n/);
+  let section = "";
+  let dependencyArray = false;
+  for (let i = 0; i < lines.length; i++) {
+    const line = stripTomlComment(lines[i]);
+    const heading = line.match(/^\s*\[([^\]]+)]\s*$/);
+    if (heading) {
+      section = heading[1].trim().toLowerCase();
+      dependencyArray = false;
+      continue;
+    }
+    const arraySection = section === "project.optional-dependencies" || section === "dependency-groups" || section === "tool.pdm.dev-dependencies";
+    if (dependencyArray) {
+      addQuotedRequirements(found, file, i + 1, line);
+      if (hasTomlArrayClose(line)) dependencyArray = false;
+      continue;
+    }
+    const projectDependencies = section === "project" && /^\s*dependencies\s*=\s*\[/.test(line);
+    const groupedDependencies = arraySection && /^\s*[^=]+\s*=\s*\[/.test(line);
+    if (projectDependencies || groupedDependencies) {
+      addQuotedRequirements(found, file, i + 1, line);
+      dependencyArray = !hasTomlArrayClose(line);
+      continue;
+    }
+    if (section === "tool.poetry.dependencies" || /^tool\.poetry\.group\.[^.]+\.dependencies$/.test(section)) {
+      const assignment = line.match(/^\s*["']?mcp["']?\s*=\s*(.+)$/i);
+      if (!assignment) continue;
+      const value = assignment[1].trim();
+      const tableVersion = value.match(/\bversion\s*=\s*["']([^"']+)["']/i);
+      const scalarVersion = value.match(/^["']([^"']+)["']/);
+      const specifier = tableVersion?.[1] ?? scalarVersion?.[1] ?? "";
+      addRequirement(found, file, i + 1, `mcp${specifier}`);
+    }
+  }
+  return found;
+}
+function parsePipfile(file, content) {
+  const found = [];
+  const lines = content.split(/\r?\n/);
+  let section = "";
+  for (let i = 0; i < lines.length; i++) {
+    const line = stripTomlComment(lines[i]);
+    const heading = line.match(/^\s*\[([^\]]+)]\s*$/);
+    if (heading) {
+      section = heading[1].trim().toLowerCase();
+      continue;
+    }
+    if (section !== "packages" && section !== "dev-packages") continue;
+    const assignment = line.match(/^\s*["']?mcp["']?\s*=\s*(.+)$/i);
+    if (!assignment) continue;
+    const value = assignment[1].trim();
+    const tableVersion = value.match(/\bversion\s*=\s*["']([^"']+)["']/i);
+    const scalarVersion = value.match(/^["']([^"']+)["']/);
+    const specifier = tableVersion?.[1] ?? scalarVersion?.[1] ?? "";
+    addRequirement(found, file, i + 1, `mcp${specifier}`);
+  }
+  return found;
+}
+function parseSetupCfg(file, content) {
+  const found = [];
+  const lines = content.split(/\r?\n/);
+  let section = "";
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].replace(/\s+#.*$/, "");
+    const heading = line.match(/^\s*\[([^\]]+)]\s*$/);
+    if (heading) {
+      section = heading[1].trim().toLowerCase();
+      continue;
+    }
+    if (section !== "options" && section !== "options.extras_require") continue;
+    addRequirement(found, file, i + 1, line.trim());
+  }
+  return found;
+}
+function parseRequirementsFile(file, content) {
+  const found = [];
+  const lines = content.split(/\r?\n/);
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].replace(/\s+#.*$/, "").trim();
+    if (!line || line.startsWith("-")) continue;
+    addRequirement(found, file, i + 1, line);
+  }
+  return found;
+}
+function addQuotedRequirements(out, file, line, text) {
+  for (const match of text.matchAll(/(["'])(.*?)\1/g)) {
+    addRequirement(out, file, line, match[2]);
+  }
+}
+function addRequirement(out, file, line, raw) {
+  const requirement = raw.trim();
+  const match = requirement.match(/^mcp(?:\s*\[[^\]]+])?\s*(.*)$/i);
+  if (!match) return;
+  const remainder = match[1].trim();
+  if (/^[-_.A-Za-z0-9]/.test(remainder)) return;
+  const specifier = remainder.split(";", 1)[0].trim();
+  out.push({
+    file,
+    line,
+    requirement,
+    specifier,
+    sdkLine: classifyPythonSdkSpecifier(specifier)
+  });
+}
+function stripTomlComment(line) {
+  let quote = null;
+  for (let i = 0; i < line.length; i++) {
+    const char = line[i];
+    if ((char === '"' || char === "'") && line[i - 1] !== "\\") {
+      quote = quote === char ? null : quote ?? char;
+    } else if (char === "#" && quote === null) {
+      return line.slice(0, i);
+    }
+  }
+  return line;
+}
+function hasTomlArrayClose(line) {
+  let quote = null;
+  for (let i = 0; i < line.length; i++) {
+    const char = line[i];
+    if ((char === '"' || char === "'") && line[i - 1] !== "\\") {
+      quote = quote === char ? null : quote ?? char;
+    } else if (char === "]" && quote === null) {
+      return true;
+    }
+  }
+  return false;
+}
+async function readPythonSdkRequirements(dir, maxBytes, maxFiles) {
+  const manifests = await collectPythonDependencyFiles(dir, maxFiles);
+  const found = [];
+  for (const manifest of manifests) {
+    const content = await readIfSmallEnough(manifest, maxBytes);
+    if (content === null) continue;
+    const relative = path.relative(dir, manifest);
+    found.push(...parsePythonSdkRequirements(relative, content));
+  }
+  return found;
+}
+function isPythonDependencyFile(name) {
+  const lower = name.toLowerCase();
+  return lower === "pyproject.toml" || lower === "pipfile" || lower === "setup.cfg" || /^requirements(?:[-_.].*)?\.(?:txt|in)$/.test(lower);
 }
 var MODERN_PACKAGES = [
   "@modelcontextprotocol/server",
@@ -644,6 +891,30 @@ async function collectFiles(dir, cap) {
         if (IGNORED_DIRS.has(e.name)) continue;
         await walk(full);
       } else if (SCANNABLE.has(path.extname(e.name))) {
+        out.push(full);
+      }
+    }
+  }
+  await walk(dir);
+  return out;
+}
+async function collectPythonDependencyFiles(dir, cap) {
+  const out = [];
+  async function walk(current) {
+    if (out.length >= cap) return;
+    let entries;
+    try {
+      entries = await fs.readdir(current, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (out.length >= cap) return;
+      const full = path.join(current, entry.name);
+      if (entry.isDirectory()) {
+        if (IGNORED_DIRS.has(entry.name)) continue;
+        await walk(full);
+      } else if (isPythonDependencyFile(entry.name)) {
         out.push(full);
       }
     }

@@ -57,10 +57,18 @@ jobs:
           notes=$(node skill/mcp-migration/scripts/mcpcheck.mjs \
             --source skill/mcp-migration-workspace/fixtures/notes-mcp --json)
           notes_code=$?
+          python_v1=$(node skill/mcp-migration/scripts/mcpcheck.mjs \
+            --source skill/mcp-migration-workspace/fixtures/python-v1-mcp --json)
+          python_v1_code=$?
+          python_v2=$(node skill/mcp-migration/scripts/mcpcheck.mjs \
+            --source skill/mcp-migration-workspace/fixtures/python-v2-mcp --json)
+          python_v2_code=$?
           set -e
 
           [ "$acme_code" = "1" ]  || { echo "acme: expected exit 1, got $acme_code"; exit 1; }
           [ "$notes_code" = "1" ] || { echo "notes: expected exit 1, got $notes_code"; exit 1; }
+          [ "$python_v1_code" = "1" ] || { echo "python v1: expected exit 1, got $python_v1_code"; exit 1; }
+          [ "$python_v2_code" = "0" ] || { echo "python v2: expected exit 0, got $python_v2_code"; exit 1; }
 
           echo "$acme"  | jq -e '[.findings[].ruleId] == ["MCP001","MCP002","MCP003","MCP005","MCP007"]' > /dev/null
           echo "$acme"  | jq -e '.grade.letter == "F"' > /dev/null
@@ -69,6 +77,12 @@ jobs:
           # (express-session, not MCP state) and MCP007 is real.
           echo "$notes" | jq -e '[.findings[].ruleId] == ["MCP002","MCP007"]' > /dev/null
           echo "$notes" | jq -e '.grade.letter == "D"' > /dev/null
+
+          echo "$python_v1" | jq -e '[.findings[].ruleId] == ["MCP001","MCP003","MCP004","MCP005","MCP009"]' > /dev/null
+          echo "$python_v1" | jq -e '.grade.letter == "F"' > /dev/null
+
+          echo "$python_v2" | jq -e '.findings == []' > /dev/null
+          echo "$python_v2" | jq -e '.grade.letter == "A"' > /dev/null
 
           echo "fixtures ok"
 
@@ -104,6 +118,26 @@ jobs:
           [ "$FINDINGS" = "5" ] || { echo "findings: expected 5, got $FINDINGS"; exit 1; }
           case "$BADGE" in https://img.shields.io/badge/*) ;; *) echo "badge: $BADGE"; exit 1;; esac
           jq -e '.grade.letter == "F"' "$REPORT" > /dev/null
+
+      - name: Scan a Python v2 fixture through the action
+        id: python
+        uses: ./
+        with:
+          source: skill/mcp-migration-workspace/fixtures/python-v2-mcp
+          fail-on: never
+          report-path: python-report.json
+
+      - name: Python action outputs are clean
+        env:
+          GRADE: ${{ steps.python.outputs.grade }}
+          SCORE: ${{ steps.python.outputs.score }}
+          FINDINGS: ${{ steps.python.outputs.findings }}
+          REPORT: ${{ steps.python.outputs.report-path }}
+        run: |
+          [ "$GRADE" = "A" ]    || { echo "grade: expected A, got $GRADE"; exit 1; }
+          [ "$SCORE" = "100" ] || { echo "score: expected 100, got $SCORE"; exit 1; }
+          [ "$FINDINGS" = "0" ] || { echo "findings: expected 0, got $FINDINGS"; exit 1; }
+          jq -e '.findings == []' "$REPORT" > /dev/null
 
       # `fail-on` is the whole point of putting this in a pipeline. If it does
       # not redden a run, everyone gets a green check over a broken server.

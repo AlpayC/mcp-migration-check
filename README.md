@@ -169,11 +169,14 @@ node skill/mcp-migration/scripts/mcpcheck.mjs --local http://localhost:3000/mcp
 | MCP006 | critical | auth without RFC 9728 protected-resource metadata                    |
 | MCP007 | warning  | still on `@modelcontextprotocol/sdk` (the v1 line)                   |
 | MCP008 | warning  | modern server that does not implement `server/discover`              |
+| MCP009 | warning  | Python `mcp` constrained to 1.x or importing the v1 `FastMCP` API    |
 | MCP101 | info     | dual-era: current **and** still accepts the legacy handshake         |
 | MCP102 | info     | session ids issued to legacy clients only                            |
 
 Live checks observe runtime behavior over HTTP; source scans grep for the same
-signals in code. Each finding links the spec page it derives from.
+signals in code. For Python they also inspect `pyproject.toml`, requirements
+files, `Pipfile`, and `setup.cfg`, including those in nested projects. Each
+finding links the spec or official SDK migration page it derives from.
 
 **Backwards compatibility is not a finding.** The `MCP1xx` rules are
 observations and cost zero points. `2026-07-28` says a server that wants to
@@ -199,15 +202,17 @@ the absence of the modern surface is a defect.
   Treat source findings as signals to review, not proof. The live probe is
   more authoritative for runtime behavior; the two complement each other.
 - **The web demo only sees the outside.** It probes over HTTP, so it cannot
-  reach MCP007, which needs a `package.json`. Use the skill for real work.
+  reach the SDK rules: MCP007 needs `package.json`, while MCP009 needs Python
+  project metadata or source. Use the skill or CLI for repository checks.
 - **MCP001 proves absence, which is the weaker claim.** It fires when the
   legacy handshake answers and no modern signal did. A server whose modern
   surface is hidden behind a WAF, a path-based gateway or an unfamiliar-method
   filter lands there wrongly. The dual-era observation cannot fail the same
   way — it needs a positive modern answer to fire at all.
-- **MCP007 is TypeScript-only.** It reads `package.json`, so a Python, Go or C#
-  server gets no SDK signal at all — even though those SDKs also moved (Python
-  and C# to 2.x, Go to a 1.x minor).
+- **SDK dependency checks currently cover TypeScript and Python.** Go and C#
+  servers still get the language-neutral source signals, but no SDK-version
+  finding. Those SDKs moved differently, so do not apply the TypeScript or
+  Python migration advice to them.
 
 ## Two rules that were wrong
 

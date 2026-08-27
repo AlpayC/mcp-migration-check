@@ -106,9 +106,11 @@ const RULES = [
   { id: "MCP004", label: "Deprecated sampling capability" },
   { id: "MCP005", label: "Deprecated roots capability" },
   { id: "MCP006", label: "Missing OAuth 2.1 posture" },
-  { id: "MCP007", label: "SDK still on the v1 line" },
+  { id: "MCP007", label: "TypeScript SDK on the v1 line" },
   { id: "MCP008", label: "No server/discover" },
+  { id: "MCP009", label: "Python SDK on the v1 line" },
   { id: "MCP101", label: "Dual-era (not a defect)" },
+  { id: "MCP102", label: "Legacy-only session ids (not a defect)" },
 ];
 
 export default function Home() {
@@ -216,10 +218,11 @@ export default function Home() {
         </BlurFade>
 
         <BlurFade delay={0.22}>
-          <p className="mx-auto mt-5 max-w-[52ch] text-balance text-center text-[17px] leading-relaxed text-muted">
+          <p className="mx-auto mt-5 max-w-[58ch] text-balance text-center text-[17px] leading-relaxed text-muted">
             The 2026-07-28 revision made MCP stateless, formalized OAuth 2.1, and
             dropped several capabilities — a refactor, not a version bump. Point
-            the checker at a running endpoint to see what breaks.
+            the browser checker at a running endpoint, or use the CLI and GitHub
+            Action to scan TypeScript and Python servers.
           </p>
         </BlurFade>
 
@@ -417,11 +420,11 @@ export default function Home() {
                   <BlurFade delay={0.12}>
                     <div className="mt-4 rounded-2xl border border-ok/25 bg-[color-mix(in_srgb,var(--color-ok)_7%,var(--color-panel))] p-6 text-[15px]">
                       <b className="font-display text-ok">Nothing fired.</b>{" "}
-                      None of the six signals reachable over HTTP were observed.
-                      That is not a clean bill of health for the whole revision:
-                      MCP007 needs a <code>package.json</code>, and{" "}
-                      <code>server/discover</code>, the required{" "}
-                      <code>resultType</code> field,{" "}
+                      None of the live-probe signals were observed. That is not
+                      a clean bill of health for the whole revision: MCP007
+                      needs a <code>package.json</code>, MCP009 needs Python
+                      project metadata or source, and complete validation of the
+                      required <code>resultType</code> field,{" "}
                       <code>subscriptions/listen</code> and the new request
                       headers are all outside what an outside-in probe can see.
                     </div>
@@ -460,8 +463,9 @@ export default function Home() {
             </h2>
             <p className="mt-3 max-w-[62ch] text-[14.5px] leading-relaxed text-muted">
               The browser is the fastest outside-in check. The same deterministic
-              rules ship as a zero-install CLI, a GitHub Action, and an agent
-              skill that reads the code and works through each remediation.
+              engine ships as a zero-install CLI, a GitHub Action, and an agent
+              skill. Their source checks scan TypeScript and Python repositories;
+              the skill also works through each remediation.
             </p>
 
             <div className="mt-6 grid gap-4 sm:grid-cols-2">
@@ -471,7 +475,7 @@ export default function Home() {
                 </div>
                 <p className="mt-1 text-[13px] leading-relaxed text-muted">
                   No install and no runtime dependencies. Probe a URL or scan a
-                  repository.
+                  TypeScript or Python repository, including SDK constraints.
                 </p>
                 <pre className="mt-3 overflow-x-auto rounded-lg border border-white/10 bg-input p-3 font-mono text-[12px] leading-relaxed text-foreground">
                   <code>{`npx mcp-migration-check <url>
@@ -484,8 +488,8 @@ npx mcp-migration-check --source .`}</code>
                   Gate every pull request
                 </div>
                 <p className="mt-1 text-[13px] leading-relaxed text-muted">
-                  Add the bundled GitHub Action and fail only when the selected
-                  severity threshold is reached.
+                  The bundled Action scans TypeScript and Python projects and
+                  fails only when the selected severity threshold is reached.
                 </p>
                 <pre className="mt-3 overflow-x-auto rounded-lg border border-white/10 bg-input p-3 font-mono text-[12px] leading-relaxed text-foreground">
                   <code>{`- uses: AlpayC/mcp-migration-check@v1

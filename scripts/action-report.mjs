@@ -120,7 +120,7 @@ if (report.inconclusive) {
 }
 md.push("");
 md.push(
-  "Seven rules are not the whole revision — this is triage, not a conformance " +
+  "These rules are not the whole revision — this is triage, not a conformance " +
     "suite. [What it does and does not cover]" +
     "(https://github.com/AlpayC/mcp-migration-check#honest-limitations)",
 );

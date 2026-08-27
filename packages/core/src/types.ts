@@ -98,6 +98,21 @@ export interface SourceMatch {
   text: string;
 }
 
+export type PythonSdkLine = "legacy" | "modern" | "unknown";
+
+/** A direct dependency on the official Python SDK found in project metadata. */
+export interface PythonSdkRequirement {
+  /** Manifest path relative to the scanned repository. */
+  file: string;
+  line: number;
+  /** The complete requirement as written, e.g. `mcp[cli]>=1.28,<2`. */
+  requirement: string;
+  /** Version portion only, e.g. `>=1.28,<2`; empty means unconstrained. */
+  specifier: string;
+  /** Whether the constraint can be assigned to one SDK major with confidence. */
+  sdkLine: PythonSdkLine;
+}
+
 /** Normalized observations from statically scanning a repository. */
 export interface SourceContext {
   /**
@@ -110,6 +125,8 @@ export interface SourceContext {
   matches: Record<string, SourceMatch[]>;
   /** Declared `@modelcontextprotocol/sdk` version (the v1 line), or null. */
   sdkVersion: string | null;
+  /** Direct `mcp` dependencies found in Python project metadata. */
+  pythonSdkRequirements?: PythonSdkRequirement[];
   filesScanned: number;
 }
 
