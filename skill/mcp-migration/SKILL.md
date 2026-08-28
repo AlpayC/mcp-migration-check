@@ -123,8 +123,9 @@ ones:
    going to keep, instead of refactoring twice. For MCP007, move to the v2
    packages and run the TypeScript codemod. For MCP009, move `mcp` to 2.x and
    follow the official Python migration guide (`FastMCP` → `MCPServer` is the
-   first import change). For MCP010, upgrade `rmcp` to 3.x (the current line
-   speaking spec 2026-07-28). The remaining errors point at the architectural work.
+   first import change). For MCP010, upgrade to `rmcp` 3.x or `rust-mcp-sdk` 2.x
+   (both speak spec 2026-07-28). For `tower-mcp`, enable the
+   `protocol-2026-07-28` feature. The remaining errors point at the architectural work.
 2. **MCP002 (session state)** — the deepest change, and the one most likely to
    surface hidden design assumptions.
 3. **MCP001 (legacy-only)** — add the modern request path and

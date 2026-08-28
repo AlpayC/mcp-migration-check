@@ -170,6 +170,7 @@ node skill/mcp-migration/scripts/mcpcheck.mjs --local http://localhost:3000/mcp
 | MCP007 | warning  | still on `@modelcontextprotocol/sdk` (the v1 line)                   |
 | MCP008 | warning  | modern server that does not implement `server/discover`              |
 | MCP009 | warning  | Python `mcp` constrained to 1.x or importing the v1 `FastMCP` API    |
+| MCP010 | warning  | Rust MCP crate on a pre-2026-07-28 line (source scan only)            |
 | MCP101 | info     | dual-era: current **and** still accepts the legacy handshake         |
 | MCP102 | info     | session ids issued to legacy clients only                            |
 
@@ -213,10 +214,15 @@ test code.
   surface is hidden behind a WAF, a path-based gateway or an unfamiliar-method
   filter lands there wrongly. The dual-era observation cannot fail the same
   way — it needs a positive modern answer to fire at all.
-- **SDK dependency checks currently cover TypeScript and Python.** Go and C#
-  servers still get the language-neutral source signals, but no SDK-version
-  finding. Those SDKs moved differently, so do not apply the TypeScript or
-  Python migration advice to them.
+- **SDK dependency checks currently cover TypeScript, Python, and Rust.** Go
+  and C# servers still get the language-neutral source signals, but no
+  SDK-version finding. Those SDKs moved differently, so do not apply the
+  TypeScript or Python migration advice to them.
+- **The Rust `Cargo.toml` parser is line-oriented and reads only the root
+  manifest.** It does not see workspace member inheritance (`workspace = true`),
+  renamed dependencies (`package = "rmcp"`), or target-specific tables. A clean
+  MCP010 result means the root manifest is clean — workspace-inherited
+  dependencies may still use an older crate version.
 
 ## Two rules that were wrong
 

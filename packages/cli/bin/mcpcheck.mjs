@@ -16,7 +16,11 @@ var SPEC = {
   pythonSdk: "https://py.sdk.modelcontextprotocol.io/migration/",
   // The official Rust SDK (rmcp) lives in its own repo, not the blog post
   // above — that one covers only Python/TS/Go/C#. Verified 2026-08-22.
-  rustSdk: "https://github.com/modelcontextprotocol/rust-sdk"
+  rustSdk: "https://github.com/modelcontextprotocol/rust-sdk",
+  rustSdkReleases: "https://github.com/modelcontextprotocol/rust-sdk/releases",
+  // Per-SDK authoritative references for MCP010 multi-crate coverage.
+  towerMcp: "https://github.com/joshrotenberg/tower-mcp",
+  rustMcpSdk: "https://github.com/rust-mcp-stack/rust-mcp-sdk"
 };
 var SPEC_VERIFIED_AT = {
   [SPEC.transport]: "2026-08-23",
@@ -32,7 +36,10 @@ var SPEC_VERIFIED_AT = {
   // Official v1-to-v2 guide: package constraint, import, and class rename.
   [SPEC.pythonSdk]: "2026-08-27",
   // Verified by hand against the rust-sdk repo README (2026-08-22).
-  [SPEC.rustSdk]: "2026-08-22"
+  [SPEC.rustSdk]: "2026-08-22",
+  [SPEC.rustSdkReleases]: "2026-08-28",
+  [SPEC.towerMcp]: "2026-08-28",
+  [SPEC.rustMcpSdk]: "2026-08-28"
 };
 var rulesVerifiedAt = Object.values(SPEC_VERIFIED_AT).sort()[0];
 function firstMatch(ctx, signal) {
@@ -230,6 +237,9 @@ var rules = [
     title: "Rust MCP SDK on a pre-2026-07-28 line",
     severity: "warning",
     specRef: SPEC.rustSdk,
+    // Per-SDK authoritative references — the owner wants each crate to cite
+    // its own repo rather than one umbrella URL for all three SDKs.
+    references: [SPEC.rustSdkReleases, SPEC.towerMcp, SPEC.rustMcpSdk],
     evaluate(ctx) {
       const deps = ctx.source?.sdkDependencies ?? [];
       const RUST_MCP_CRATES = /* @__PURE__ */ new Set(["rmcp", "rust-mcp-sdk", "tower-mcp"]);
@@ -248,19 +258,24 @@ var rules = [
               detail: `Cargo.toml depends on ${dep.name} (${dep.constraint}). That is a pre-2026-07-28 line; rmcp 3.x is the current line speaking spec 2026-07-28.`,
               fix: "Upgrade rmcp to 3.x (the current line speaking spec 2026-07-28).",
               specRef: SPEC.rustSdk,
+              references: [SPEC.rustSdkReleases],
               location: dep.manifest
             };
           }
           continue;
         }
         if (dep.name === "rust-mcp-sdk") {
+          const majorMatch = dep.constraint.match(/\d+/);
+          const major = majorMatch ? Number.parseInt(majorMatch[0], 10) : NaN;
+          if (!Number.isNaN(major) && major >= 2) continue;
           return {
             ruleId: "MCP010",
             title: "Rust MCP SDK on a pre-2026-07-28 line",
             severity: "warning",
-            detail: `Cargo.toml depends on rust-mcp-sdk (${dep.constraint}). That crate only speaks the 2025-11-25 protocol; it never adopted 2026-07-28.`,
-            fix: "rust-mcp-sdk only speaks 2025-11-25; migrate to rmcp 3.x.",
-            specRef: SPEC.rustSdk,
+            detail: `Cargo.toml depends on rust-mcp-sdk (${dep.constraint}). That crate only speaks the 2025-11-25 protocol; migrate to rmcp 3.x or rust-mcp-sdk 2.x.`,
+            fix: "Upgrade to rmcp 3.x or rust-mcp-sdk 2.x (both speak 2026-07-28).",
+            specRef: SPEC.rustMcpSdk,
+            references: [SPEC.rustSdk, SPEC.rustSdkReleases],
             location: dep.manifest
           };
         }
@@ -272,7 +287,8 @@ var rules = [
               severity: "warning",
               detail: `Cargo.toml depends on tower-mcp (${dep.constraint}) without the protocol-2026-07-28 feature. That crate speaks 2026-07-28 only when that feature is enabled.`,
               fix: "For tower-mcp, enable the protocol-2026-07-28 feature.",
-              specRef: SPEC.rustSdk,
+              specRef: SPEC.towerMcp,
+              references: [SPEC.rustSdk, SPEC.rustSdkReleases],
               location: dep.manifest
             };
           }
@@ -358,28 +374,9 @@ function gradeFrom(findings) {
   const letter = score >= 90 ? "A" : score >= 75 ? "B" : score >= 60 ? "C" : score >= 40 ? "D" : "F";
   return { score, letter };
 }
-function applyTestModuleDownrank(findings, ctx) {
-  const ranges = ctx.source?.testModuleRanges;
-  if (!ranges || ranges.length === 0) return findings;
-  for (const f of findings) {
-    const m = /^(.+):(\d+)$/.exec(f.location ?? "");
-    if (!m) continue;
-    const file = m[1];
-    const line = Number(m[2]);
-    const hit = ranges.find(
-      (r) => r.file === file && line >= r.start && line <= r.end
-    );
-    if (!hit) continue;
-    if (f.severity === "critical") f.severity = "warning";
-    else if (f.severity === "warning") f.severity = "info";
-    f.note = "Down-ranked: located in a #[cfg(test)] module";
-  }
-  return findings;
-}
 function evaluate(ctx) {
   const order = ["critical", "warning", "info"];
-  const findings = rules.map((r) => r.evaluate(ctx)).filter((f) => f !== null).sort((a, b) => order.indexOf(a.severity) - order.indexOf(b.severity));
-  return applyTestModuleDownrank(findings, ctx);
+  return rules.map((r) => r.evaluate(ctx)).filter((f) => f !== null).sort((a, b) => order.indexOf(a.severity) - order.indexOf(b.severity));
 }
 
 // packages/core/src/probe.ts
@@ -703,104 +700,12 @@ var SIGNAL_PATTERNS = {
    */
   modernEra: /io\.modelcontextprotocol\/(protocolVersion|clientCapabilities|clientInfo|serverInfo)|["']server\/discover["']|@modelcontextprotocol\/(server|client|core)\b|\bfrom\s+mcp\.server\s+import\s+[^#\n]*\bMCPServer\b|\bfrom\s+mcp\.server\.mcpserver(?:\.[A-Za-z_][\w.]*)?\s+import\b/
 };
-function detectTestModuleRanges(dir, file, content) {
-  const lines = content.split(/\r?\n/);
-  const ranges = [];
-  const rel = path.relative(dir, file);
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    const cfgMatch = /#\[cfg\(test\)\]/.test(line);
-    if (!cfgMatch) continue;
-    let declIdx = i;
-    if (!/\bmod\s+\w+\s*[;{]/.test(line)) {
-      let j = i + 1;
-      while (j < lines.length && /^\s*#(!?)\[/.test(lines[j])) {
-        j++;
-      }
-      declIdx = j;
-    }
-    const declLine = lines[declIdx] ?? "";
-    const inline = /\bmod\s+\w+\s*\{/.test(declLine);
-    const fileBased = /\bmod\s+\w+\s*;\s*$/.test(declLine);
-    if (inline) {
-      const openCol = declLine.indexOf("{");
-      let depth = 0;
-      let inStr = null;
-      let inLineComment = false;
-      let inBlockComment = false;
-      let closedAt = -1;
-      for (let j = declIdx; j < lines.length; j++) {
-        const text = lines[j];
-        for (let c = j === declIdx ? openCol : 0; c < text.length; c++) {
-          const ch = text[c];
-          if (inLineComment) continue;
-          if (inBlockComment) {
-            if (ch === "*" && text[c + 1] === "/") {
-              inBlockComment = false;
-              c++;
-            }
-            continue;
-          }
-          if (inStr) {
-            if (ch === "\\") {
-              c++;
-              continue;
-            }
-            if (ch === inStr) inStr = null;
-            continue;
-          }
-          if (ch === "/" && text[c + 1] === "/") {
-            inLineComment = true;
-            break;
-          }
-          if (ch === "/" && text[c + 1] === "*") {
-            inBlockComment = true;
-            c++;
-            continue;
-          }
-          if (ch === '"') {
-            inStr = '"';
-            continue;
-          }
-          if (ch === "{" && text[c + 1] === "{") {
-            c++;
-            continue;
-          }
-          if (ch === "}" && text[c + 1] === "}") {
-            c++;
-            continue;
-          }
-          if (ch === "}") {
-            depth--;
-            if (depth === 0) {
-              closedAt = j;
-              break;
-            }
-            continue;
-          }
-          if (ch === "{") depth++;
-        }
-        inLineComment = false;
-        if (closedAt !== -1) break;
-      }
-      if (closedAt !== -1) {
-        ranges.push({ file: rel, start: i + 1, end: closedAt + 1 });
-      } else {
-        ranges.push({ file: rel, start: i + 1, end: lines.length });
-      }
-    } else if (fileBased) {
-      ranges.push({ file: rel, start: 1, end: lines.length });
-    }
-  }
-  return ranges;
-}
 async function scanSource(dir, opts = {}) {
   const maxFiles = opts.maxFiles ?? 5e3;
   const maxBytes = opts.maxBytesPerFile ?? 1e6;
   const matches = {};
   for (const key of Object.keys(SIGNAL_PATTERNS)) matches[key] = [];
   let filesScanned = 0;
-  const testModuleRanges = [];
   const files = await collectFiles(dir, maxFiles);
   for (const file of files) {
     const content = await readIfSmallEnough(file, maxBytes);
@@ -819,10 +724,6 @@ async function scanSource(dir, opts = {}) {
         }
       }
     }
-    if (path.extname(file) === ".rs") {
-      const ranges = detectTestModuleRanges(dir, file, content);
-      for (const r of ranges) testModuleRanges.push(r);
-    }
   }
   const pkg = await readPackageJson(dir);
   for (const name of pkg.modernPackages) {
@@ -837,7 +738,7 @@ async function scanSource(dir, opts = {}) {
       text: req.requirement
     });
   }
-  return { matches, sdkVersion: pkg.sdkVersion, pythonSdkRequirements, filesScanned, sdkDependencies: await readCargoDependencies(dir), testModuleRanges };
+  return { matches, sdkVersion: pkg.sdkVersion, pythonSdkRequirements, filesScanned, sdkDependencies: await readCargoDependencies(dir) };
 }
 function classifyPythonSdkSpecifier(specifier) {
   const value = specifier.trim().replace(/^(["'])(.*)\1$/, "$2").trim();
@@ -1041,51 +942,54 @@ async function readPackageJson(dir) {
     return { sdkVersion: null, modernPackages: [] };
   }
 }
-async function readCargoDependencies(dir) {
+function parseCargoToml(content) {
   const ALLOWED = /* @__PURE__ */ new Set(["rmcp", "rust-mcp-sdk", "tower-mcp"]);
+  const lines = content.split(/\r?\n/);
+  const deps = [];
+  let inTable = false;
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith("[")) {
+      inTable = trimmed === "[dependencies]" || trimmed === "[dev-dependencies]" || trimmed === "[workspace.dependencies]";
+      continue;
+    }
+    if (!inTable) continue;
+    const m = trimmed.match(/^([A-Za-z0-9_-]+)\s*=\s*(.+)$/);
+    if (!m) continue;
+    const name = m[1];
+    if (!ALLOWED.has(name)) continue;
+    const rhs = m[2].trim();
+    let constraint = "";
+    const features = [];
+    if (rhs.startsWith("{")) {
+      const v = rhs.match(/version\s*=\s*"([^"]*)"/);
+      if (v) constraint = v[1];
+      const f = rhs.match(/features\s*=\s*\[([^\]]*)\]/);
+      if (f) {
+        for (const part of f[1].split(",")) {
+          const feat = part.trim().replace(/^"|"$/g, "");
+          if (feat) features.push(feat);
+        }
+      }
+    } else {
+      const v = rhs.match(/^"([^"]*)"$/);
+      if (v) constraint = v[1];
+    }
+    if (!constraint) continue;
+    deps.push({
+      ecosystem: "cargo",
+      name,
+      constraint,
+      manifest: "Cargo.toml",
+      ...features.length ? { features } : {}
+    });
+  }
+  return deps;
+}
+async function readCargoDependencies(dir) {
   try {
     const raw = await fs.readFile(path.join(dir, "Cargo.toml"), "utf8");
-    const lines = raw.split(/\r?\n/);
-    const deps = [];
-    let inTable = false;
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (trimmed.startsWith("[")) {
-        inTable = trimmed === "[dependencies]" || trimmed === "[dev-dependencies]" || trimmed === "[workspace.dependencies]";
-        continue;
-      }
-      if (!inTable) continue;
-      const m = trimmed.match(/^([A-Za-z0-9_-]+)\s*=\s*(.+)$/);
-      if (!m) continue;
-      const name = m[1];
-      if (!ALLOWED.has(name)) continue;
-      const rhs = m[2].trim();
-      let constraint = "";
-      const features = [];
-      if (rhs.startsWith("{")) {
-        const v = rhs.match(/version\s*=\s*"([^"]*)"/);
-        if (v) constraint = v[1];
-        const f = rhs.match(/features\s*=\s*\[([^\]]*)\]/);
-        if (f) {
-          for (const part of f[1].split(",")) {
-            const feat = part.trim().replace(/^"|"$/g, "");
-            if (feat) features.push(feat);
-          }
-        }
-      } else {
-        const v = rhs.match(/^"([^"]*)"$/);
-        if (v) constraint = v[1];
-      }
-      if (!constraint) continue;
-      deps.push({
-        ecosystem: "cargo",
-        name,
-        constraint,
-        manifest: "Cargo.toml",
-        ...features.length ? { features } : {}
-      });
-    }
-    return deps;
+    return parseCargoToml(raw);
   } catch {
     return [];
   }
@@ -1309,6 +1213,11 @@ function render(result) {
     out.push(`  observed: ${f.detail}`);
     out.push(`  fix:      ${f.fix}`);
     out.push(`  spec:     ${f.specRef}`);
+    if (f.references && f.references.length > 0) {
+      for (const ref of f.references) {
+        out.push(`  see also: ${ref}`);
+      }
+    }
     if (f.note) out.push(`  note:     ${f.note}`);
     out.push("");
   }

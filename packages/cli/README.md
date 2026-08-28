@@ -62,6 +62,7 @@ usable as a CI gate directly, or via the
 | MCP007 | warning  | still on `@modelcontextprotocol/sdk` (the v1 line)                  |
 | MCP008 | warning  | modern server that does not implement `server/discover`             |
 | MCP009 | warning  | Python `mcp` constrained to 1.x or importing the v1 `FastMCP` API   |
+| MCP010 | warning  | Rust MCP crate on a pre-2026-07-28 line (source scan only)           |
 | MCP101 | info     | dual-era: current **and** still accepts the legacy handshake        |
 | MCP102 | info     | session ids issued to legacy clients only                           |
 

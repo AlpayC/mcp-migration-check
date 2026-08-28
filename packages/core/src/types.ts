@@ -7,7 +7,7 @@
  * pure, deterministic, and trivial to unit-test.
  */
 
-export type Severity = 'critical' | 'warning' | 'info';
+export type Severity = "critical" | "warning" | "info";
 
 export interface Finding {
   ruleId: string;
@@ -19,6 +19,8 @@ export interface Finding {
   fix: string;
   /** Pointer into the canonical spec so the user can verify the rule. */
   specRef: string;
+  /** Additional authoritative references (e.g. per-SDK repos). */
+  references?: string[];
   /** "live endpoint" or a `file:line` reference for source findings. */
   location?: string;
   /** Optional annotation, e.g. why a finding was down-ranked. */
@@ -27,10 +29,10 @@ export interface Finding {
 
 export interface Grade {
   score: number;
-  letter: 'A' | 'B' | 'C' | 'D' | 'F';
+  letter: "A" | "B" | "C" | "D" | "F";
 }
 
-export type CheckMode = 'live' | 'source';
+export type CheckMode = "live" | "source";
 
 export interface CheckResult {
   target: string;
@@ -56,6 +58,22 @@ export interface CheckResult {
  * - `unknown` — nothing answered in a way that identified either era.
  */
 export type ServerEra = "modern" | "legacy" | "dual" | "unknown";
+
+/** Package ecosystem that declared an MCP SDK dependency. */
+export type Ecosystem = "npm" | "cargo"; // extensible: "pypi" | "go" | "nuget"
+
+/** A single declared MCP SDK dependency, normalized across manifest kinds. */
+export interface SdkDependency {
+  ecosystem: Ecosystem;
+  /** Package/crate name as declared, e.g. "@modelcontextprotocol/sdk" or "rmcp". */
+  name: string;
+  /** Raw version constraint as written: "^1.17.0", "3", "3.1.4". */
+  constraint: string;
+  /** Manifest that declared it, relative to scan root — feeds Finding.location. */
+  manifest: string; // "package.json" | "Cargo.toml"
+  /** Cargo feature flags, when the manifest expresses them. */
+  features?: string[];
+}
 
 /** Normalized observations from probing a running MCP server over HTTP. */
 export interface ProbeContext {
@@ -115,22 +133,6 @@ export interface PythonSdkRequirement {
   sdkLine: PythonSdkLine;
 }
 
-/** Package ecosystem that declared an MCP SDK dependency. */
-export type Ecosystem = 'npm' | 'cargo'; // extensible: "pypi" | "go" | "nuget"
-
-/** A single declared MCP SDK dependency, normalized across manifest kinds. */
-export interface SdkDependency {
-  ecosystem: Ecosystem;
-  /** Package/crate name as declared, e.g. "@modelcontextprotocol/sdk" or "rmcp". */
-  name: string;
-  /** Raw version constraint as written: "^1.17.0", "3", "3.1.4". */
-  constraint: string;
-  /** Manifest that declared it, relative to scan root — feeds Finding.location. */
-  manifest: string; // "package.json" | "Cargo.toml"
-  /** Cargo feature flags, when the manifest expresses them. */
-  features?: string[];
-}
-
 /** Normalized observations from statically scanning a repository. */
 export interface SourceContext {
   /**
@@ -145,11 +147,9 @@ export interface SourceContext {
   sdkVersion: string | null;
   /** Direct `mcp` dependencies found in Python project metadata. */
   pythonSdkRequirements?: PythonSdkRequirement[];
-  filesScanned: number;
   /** All MCP SDK dependencies found across every manifest kind (npm + cargo). */
   sdkDependencies?: SdkDependency[];
-  /** Spans of `#[cfg(test)]` modules, used to down-rank test-code findings. */
-  testModuleRanges?: { file: string; start: number; end: number }[];
+  filesScanned: number;
 }
 
 export interface RuleContext {
@@ -162,6 +162,8 @@ export interface Rule {
   title: string;
   severity: Severity;
   specRef: string;
+  /** Additional authoritative references (e.g. per-SDK repos for multi-crate rules). */
+  references?: string[];
   /** Returns a Finding when the rule fires, otherwise null. */
   evaluate(ctx: RuleContext): Finding | null;
 }

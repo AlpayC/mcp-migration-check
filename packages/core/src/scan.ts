@@ -81,136 +81,6 @@ export interface ScanOptions {
   maxBytesPerFile?: number;
 }
 
-/**
- * Detect the line spans of `#[cfg(test)]` modules in a Rust source file.
- *
- * Pure and disk-free so it can be unit-tested directly. Two shapes are
- * recognised:
- *
- *  - Inline module: `#[cfg(test)]` (optionally `mod NAME` on the next line)
- *    followed by `mod NAME { … }`. The closing brace is brace-matched, with
- *    awareness of strings, line comments, block comments, and macro `{{ }}`
- *    groups (which are not Rust braces).
- *  - File-based module: `#[cfg(test)]` then `mod NAME;` (semicolon, no body)
- *    → the whole file is the test module.
- *
- * `file` is returned as `path.relative(dir, file)` — the same relative form as
- * `SourceMatch.file` — so the engine's range comparison against a finding's
- * `location` works.
- */
-export function detectTestModuleRanges(
-  dir: string,
-  file: string,
-  content: string,
-): { file: string; start: number; end: number }[] {
-  const lines = content.split(/\r?\n/);
-  const ranges: { file: string; start: number; end: number }[] = [];
-  const rel = path.relative(dir, file);
-
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    // `#[cfg(test)]` may be followed by `mod NAME {` on the same line or the
-    // next. Allow an optional `mod NAME` between the attribute and the body.
-    const cfgMatch = /#\[cfg\(test\)\]/.test(line);
-    if (!cfgMatch) continue;
-
-    // After a `#[cfg(test)]` attribute, the module declaration may appear on
-    // the same line, or on a following line preceded by other attributes
-    // (e.g. `#[allow(unused)]`). Scan forward over attribute-only lines until
-    // we reach the declaration line.
-    let declIdx = i;
-    if (!/\bmod\s+\w+\s*[;{]/.test(line)) {
-      let j = i + 1;
-      while (j < lines.length && /^\s*#(!?)\[/.test(lines[j])) {
-        j++;
-      }
-      declIdx = j;
-    }
-    const declLine = lines[declIdx] ?? '';
-
-    // Only a real `mod` declaration counts as a test module. A `#[cfg(test)] fn`
-    // or `#[cfg(test)] struct` is NOT a module and must not produce a range.
-    const inline = /\bmod\s+\w+\s*\{/.test(declLine);
-    const fileBased = /\bmod\s+\w+\s*;\s*$/.test(declLine);
-
-    if (inline) {
-      // Brace-match from the opening `{` on the declaration line.
-      const openCol = declLine.indexOf('{');
-      let depth = 0;
-      let inStr: '"' | null = null;
-      let inLineComment = false;
-      let inBlockComment = false;
-      let closedAt = -1;
-      for (let j = declIdx; j < lines.length; j++) {
-        const text = lines[j];
-        for (let c = j === declIdx ? openCol : 0; c < text.length; c++) {
-          const ch = text[c];
-          if (inLineComment) continue;
-          if (inBlockComment) {
-            if (ch === '*' && text[c + 1] === '/') {
-              inBlockComment = false;
-              c++;
-            }
-            continue;
-          }
-          if (inStr) {
-            if (ch === '\\') {
-              c++;
-              continue;
-            }
-            if (ch === inStr) inStr = null;
-            continue;
-          }
-          if (ch === '/' && text[c + 1] === '/') {
-            inLineComment = true;
-            break;
-          }
-          if (ch === '/' && text[c + 1] === '*') {
-            inBlockComment = true;
-            c++;
-            continue;
-          }
-          if (ch === '"') {
-            inStr = '"';
-            continue;
-          }
-          // Macro `{{ }}` groups are not Rust braces — skip them on both ends.
-          if (ch === '{' && text[c + 1] === '{') {
-            c++;
-            continue;
-          }
-          if (ch === '}' && text[c + 1] === '}') {
-            c++;
-            continue;
-          }
-          if (ch === '}') {
-            depth--;
-            if (depth === 0) {
-              closedAt = j;
-              break;
-            }
-            continue;
-          }
-          if (ch === '{') depth++;
-        }
-        inLineComment = false;
-        if (closedAt !== -1) break;
-      }
-      if (closedAt !== -1) {
-        ranges.push({ file: rel, start: i + 1, end: closedAt + 1 });
-      } else {
-        // Unterminated module (e.g. a `mod tests {` that runs to EOF): span to
-        // the end of the file rather than dropping it.
-        ranges.push({ file: rel, start: i + 1, end: lines.length });
-      }
-    } else if (fileBased) {
-      ranges.push({ file: rel, start: 1, end: lines.length });
-    }
-  }
-
-  return ranges;
-}
-
 export async function scanSource(
   dir: string,
   opts: ScanOptions = {},
@@ -222,7 +92,6 @@ export async function scanSource(
   for (const key of Object.keys(SIGNAL_PATTERNS)) matches[key] = [];
 
   let filesScanned = 0;
-  const testModuleRanges: { file: string; start: number; end: number }[] = [];
   const files = await collectFiles(dir, maxFiles);
 
   for (const file of files) {
@@ -244,10 +113,6 @@ export async function scanSource(
           });
         }
       }
-    }
-    if (path.extname(file) === '.rs') {
-      const ranges = detectTestModuleRanges(dir, file, content);
-      for (const r of ranges) testModuleRanges.push(r);
     }
   }
 
@@ -271,7 +136,7 @@ export async function scanSource(
     });
   }
 
-  return { matches, sdkVersion: pkg.sdkVersion, pythonSdkRequirements, filesScanned, sdkDependencies: await readCargoDependencies(dir), testModuleRanges };
+  return { matches, sdkVersion: pkg.sdkVersion, pythonSdkRequirements, filesScanned, sdkDependencies: await readCargoDependencies(dir) };
 }
 
 /**
@@ -571,54 +436,76 @@ async function readPackageJson(
  * (`rmcp = { version = "3", features = [...] }`) are handled. Tolerant like
  * `readSdkVersion`: a missing or unparseable manifest yields `[]`.
  */
-async function readCargoDependencies(dir: string): Promise<SdkDependency[]> {
+/**
+ * Parse MCP-relevant crate dependencies from Cargo.toml content.
+ *
+ * Pure, line-oriented, dependency-free: no TOML crate may be added because
+ * the skill bundle must stay lean. Only the three MCP framework crates are
+ * emitted; `mcp-server` (stale) and `rig-core` (not an MCP framework) are
+ * skipped. Both the inline-string form (`rmcp = "3.1.4"`) and the table form
+ * (`rmcp = { version = "3", features = [...] }`) are handled.
+ *
+ * Documented scope:
+ * - Sections: `[dependencies]`, `[dev-dependencies]`, `[workspace.dependencies]`
+ * - Inline string: `rmcp = "3.1.4"`
+ * - Table: `rmcp = { version = "3", features = ["sse"] }`
+ * - Recognised crates: `rmcp`, `rust-mcp-sdk`, `tower-mcp`
+ * - Ignored: any other crate name, `workspace = true`, renamed deps,
+ *   target-specific sections (`[target.*.dependencies]`), complex version
+ *   ranges without a quoted string (e.g. `{ git = "…" }` with no version).
+ */
+export function parseCargoToml(content: string): SdkDependency[] {
   const ALLOWED = new Set(["rmcp", "rust-mcp-sdk", "tower-mcp"]);
+  const lines = content.split(/\r?\n/);
+  const deps: SdkDependency[] = [];
+  let inTable = false;
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith("[")) {
+      inTable =
+        trimmed === "[dependencies]" ||
+        trimmed === "[dev-dependencies]" ||
+        trimmed === "[workspace.dependencies]";
+      continue;
+    }
+    if (!inTable) continue;
+    const m = trimmed.match(/^([A-Za-z0-9_-]+)\s*=\s*(.+)$/);
+    if (!m) continue;
+    const name = m[1];
+    if (!ALLOWED.has(name)) continue;
+    const rhs = m[2].trim();
+    let constraint = "";
+    const features: string[] = [];
+    if (rhs.startsWith("{")) {
+      const v = rhs.match(/version\s*=\s*"([^"]*)"/);
+      if (v) constraint = v[1];
+      const f = rhs.match(/features\s*=\s*\[([^\]]*)\]/);
+      if (f) {
+        for (const part of f[1].split(",")) {
+          const feat = part.trim().replace(/^"|"$/g, "");
+          if (feat) features.push(feat);
+        }
+      }
+    } else {
+      const v = rhs.match(/^"([^"]*)"$/);
+      if (v) constraint = v[1];
+    }
+    if (!constraint) continue;
+    deps.push({
+      ecosystem: "cargo",
+      name,
+      constraint,
+      manifest: "Cargo.toml",
+      ...(features.length ? { features } : {}),
+    });
+  }
+  return deps;
+}
+
+async function readCargoDependencies(dir: string): Promise<SdkDependency[]> {
   try {
     const raw = await fs.readFile(path.join(dir, "Cargo.toml"), "utf8");
-    const lines = raw.split(/\r?\n/);
-    const deps: SdkDependency[] = [];
-    let inTable = false;
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (trimmed.startsWith("[")) {
-        inTable =
-          trimmed === "[dependencies]" ||
-          trimmed === "[dev-dependencies]" ||
-          trimmed === "[workspace.dependencies]";
-        continue;
-      }
-      if (!inTable) continue;
-      const m = trimmed.match(/^([A-Za-z0-9_-]+)\s*=\s*(.+)$/);
-      if (!m) continue;
-      const name = m[1];
-      if (!ALLOWED.has(name)) continue;
-      const rhs = m[2].trim();
-      let constraint = "";
-      const features: string[] = [];
-      if (rhs.startsWith("{")) {
-        const v = rhs.match(/version\s*=\s*"([^"]*)"/);
-        if (v) constraint = v[1];
-        const f = rhs.match(/features\s*=\s*\[([^\]]*)\]/);
-        if (f) {
-          for (const part of f[1].split(",")) {
-            const feat = part.trim().replace(/^"|"$/g, "");
-            if (feat) features.push(feat);
-          }
-        }
-      } else {
-        const v = rhs.match(/^"([^"]*)"$/);
-        if (v) constraint = v[1];
-      }
-      if (!constraint) continue;
-      deps.push({
-        ecosystem: "cargo",
-        name,
-        constraint,
-        manifest: "Cargo.toml",
-        ...(features.length ? { features } : {}),
-      });
-    }
-    return deps;
+    return parseCargoToml(raw);
   } catch {
     return [];
   }

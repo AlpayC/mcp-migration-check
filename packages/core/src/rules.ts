@@ -43,6 +43,10 @@ const SPEC = {
   // The official Rust SDK (rmcp) lives in its own repo, not the blog post
   // above — that one covers only Python/TS/Go/C#. Verified 2026-08-22.
   rustSdk: "https://github.com/modelcontextprotocol/rust-sdk",
+  rustSdkReleases: "https://github.com/modelcontextprotocol/rust-sdk/releases",
+  // Per-SDK authoritative references for MCP010 multi-crate coverage.
+  towerMcp: "https://github.com/joshrotenberg/tower-mcp",
+  rustMcpSdk: "https://github.com/rust-mcp-stack/rust-mcp-sdk",
 } as const;
 
 /**
@@ -73,6 +77,9 @@ export const SPEC_VERIFIED_AT: Record<string, string> = {
   [SPEC.pythonSdk]: "2026-08-27",
   // Verified by hand against the rust-sdk repo README (2026-08-22).
   [SPEC.rustSdk]: "2026-08-22",
+  [SPEC.rustSdkReleases]: "2026-08-28",
+  [SPEC.towerMcp]: "2026-08-28",
+  [SPEC.rustMcpSdk]: "2026-08-28",
 };
 
 /** The oldest citation date — what a report should quote, not the newest. */
@@ -338,6 +345,9 @@ export const rules: Rule[] = [
     title: "Rust MCP SDK on a pre-2026-07-28 line",
     severity: "warning",
     specRef: SPEC.rustSdk,
+    // Per-SDK authoritative references — the owner wants each crate to cite
+    // its own repo rather than one umbrella URL for all three SDKs.
+    references: [SPEC.rustSdkReleases, SPEC.towerMcp, SPEC.rustMcpSdk],
     evaluate(ctx): Finding | null {
       const deps = ctx.source?.sdkDependencies ?? [];
       const RUST_MCP_CRATES = new Set(["rmcp", "rust-mcp-sdk", "tower-mcp"]);
@@ -358,25 +368,31 @@ export const rules: Rule[] = [
               detail: `Cargo.toml depends on ${dep.name} (${dep.constraint}). That is a pre-2026-07-28 line; rmcp 3.x is the current line speaking spec 2026-07-28.`,
               fix: "Upgrade rmcp to 3.x (the current line speaking spec 2026-07-28).",
               specRef: SPEC.rustSdk,
+              references: [SPEC.rustSdkReleases],
               location: dep.manifest,
             };
           }
           continue;
         }
-        // rust-mcp-sdk only speaks 2025-11-25; any version is pre-2026-07-28.
+        // rust-mcp-sdk v1.x only speaks 2025-11-25; any v1.x is pre-2026-07-28.
         if (dep.name === "rust-mcp-sdk") {
+          const majorMatch = dep.constraint.match(/\d+/);
+          const major = majorMatch ? Number.parseInt(majorMatch[0], 10) : NaN;
+          if (!Number.isNaN(major) && major >= 2) continue; // v2.x speaks 2026-07-28
           return {
             ruleId: "MCP010",
             title: "Rust MCP SDK on a pre-2026-07-28 line",
             severity: "warning",
-            detail: `Cargo.toml depends on rust-mcp-sdk (${dep.constraint}). That crate only speaks the 2025-11-25 protocol; it never adopted 2026-07-28.`,
-            fix: "rust-mcp-sdk only speaks 2025-11-25; migrate to rmcp 3.x.",
-            specRef: SPEC.rustSdk,
+            detail: `Cargo.toml depends on rust-mcp-sdk (${dep.constraint}). That crate only speaks the 2025-11-25 protocol; migrate to rmcp 3.x or rust-mcp-sdk 2.x.`,
+            fix: "Upgrade to rmcp 3.x or rust-mcp-sdk 2.x (both speak 2026-07-28).",
+            specRef: SPEC.rustMcpSdk,
+            references: [SPEC.rustSdk, SPEC.rustSdkReleases],
             location: dep.manifest,
           };
         }
         // tower-mcp opts into the current spec via the protocol-2026-07-28
-        // feature. Fire only when features are known AND lack the flag.
+        // feature. Fire ONLY when features are parsed AND the flag is absent;
+        // an unparsed dependency is silently skipped (no false positive).
         if (dep.name === "tower-mcp") {
           if (dep.features && !dep.features.includes("protocol-2026-07-28")) {
             return {
@@ -385,7 +401,8 @@ export const rules: Rule[] = [
               severity: "warning",
               detail: `Cargo.toml depends on tower-mcp (${dep.constraint}) without the protocol-2026-07-28 feature. That crate speaks 2026-07-28 only when that feature is enabled.`,
               fix: "For tower-mcp, enable the protocol-2026-07-28 feature.",
-              specRef: SPEC.rustSdk,
+              specRef: SPEC.towerMcp,
+              references: [SPEC.rustSdk, SPEC.rustSdkReleases],
               location: dep.manifest,
             };
           }

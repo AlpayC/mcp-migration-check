@@ -419,11 +419,23 @@ test("MCP010 stays quiet for rmcp >= 3", () => {
   }
 });
 
-test("MCP010 fires on rust-mcp-sdk at any version", () => {
-  const ctx = withRustDeps(rustSdkDep("rust-mcp-sdk", "0.5.0"));
-  const f = evaluate({ source: ctx }).find((x) => x.ruleId === "MCP010");
-  assert.ok(f);
-  assert.ok(f.fix.includes("rmcp 3.x"));
+test("MCP010 fires on rust-mcp-sdk v1.x", () => {
+  for (const version of ["0.5.0", "1.0.0", "1.5.2"]) {
+    const ctx = withRustDeps(rustSdkDep("rust-mcp-sdk", version));
+    const f = evaluate({ source: ctx }).find((x) => x.ruleId === "MCP010");
+    assert.ok(f, `MCP010 should fire for rust-mcp-sdk ${version}`);
+    assert.ok(f.fix.includes("rmcp 3.x"), `fix should mention rmcp 3.x for ${version}`);
+  }
+});
+
+test("MCP010 stays quiet for rust-mcp-sdk >= 2", () => {
+  for (const version of ["2.0.0", "^2"]) {
+    const ctx = withRustDeps(rustSdkDep("rust-mcp-sdk", version));
+    assert.ok(
+      !ids({ source: ctx }).includes("MCP010"),
+      `MCP010 should not fire for rust-mcp-sdk ${version}`,
+    );
+  }
 });
 
 test("MCP010 fires on tower-mcp without the protocol-2026-07-28 feature", () => {
@@ -431,6 +443,8 @@ test("MCP010 fires on tower-mcp without the protocol-2026-07-28 feature", () => 
   const f = evaluate({ source: ctx }).find((x) => x.ruleId === "MCP010");
   assert.ok(f);
   assert.ok(f.fix.includes("protocol-2026-07-28"));
+  // tower-mcp finding should cite its own repo, not the umbrella rmcp URL
+  assert.equal(f.specRef, "https://github.com/joshrotenberg/tower-mcp");
 });
 
 test("MCP010 stays quiet for tower-mcp with the protocol-2026-07-28 feature", () => {
@@ -440,6 +454,14 @@ test("MCP010 stays quiet for tower-mcp with the protocol-2026-07-28 feature", ()
 
 test("MCP010 stays quiet when no cargo dependencies are present", () => {
   assert.ok(!ids({ source: withSdk("^1.17.0") }).includes("MCP010"));
+});
+
+test("MCP010 stays quiet when tower-mcp features are not parsed", () => {
+  // The rule can only report a missing protocol-2026-07-28 feature when it
+  // has actually parsed a feature list that omits it.  An unparsed dependency
+  // (no explicit features array in the same manifest) is silently skipped.
+  const ctx = withRustDeps(rustSdkDep("tower-mcp", "1.0.0"));
+  assert.ok(!ids({ source: ctx }).includes("MCP010"));
 });
 
 test("MCP010 needs a checkout — a live probe cannot see Cargo.toml", () => {
@@ -459,6 +481,18 @@ test("no specRef relies on a page anchor", () => {
       !rule.specRef.includes("#"),
       `${rule.id} specRef relies on an anchor: ${rule.specRef}`,
     );
+    if (rule.references) {
+      for (const ref of rule.references) {
+        assert.ok(
+          ref.startsWith("https://"),
+          `${rule.id} reference must be absolute https, got ${ref}`,
+        );
+        assert.ok(
+          !ref.includes("#"),
+          `${rule.id} reference relies on an anchor: ${ref}`,
+        );
+      }
+    }
   }
 });
 
