@@ -190,10 +190,6 @@ drifted. The live probe therefore opens as a *modern* client
 `MCP-Protocol-Version` header) and only then tries the legacy handshake. Only
 the absence of the modern surface is a defect.
 
-Findings located inside a Rust `#[cfg(test)]` module are down-ranked one
-severity level (critical→warning, warning→info) to reduce false positives from
-test code.
-
 ## Honest limitations
 
 - **These rules are not the whole revision.** The 2026-07-28 changelog also makes
