@@ -248,9 +248,10 @@ var rules = [
       );
       for (const dep of rustMcpDeps) {
         if (dep.name === "rmcp") {
-          const majorMatch = dep.constraint.match(/\d+/);
-          const major = majorMatch ? Number.parseInt(majorMatch[0], 10) : NaN;
-          if (typeof major === "number" && !Number.isNaN(major) && major < 3) {
+          const majorMatch = dep.constraint.match(/^[~^]?(\d+)/);
+          if (!majorMatch) continue;
+          const major = Number.parseInt(majorMatch[1], 10);
+          if (!Number.isNaN(major) && major < 3) {
             return {
               ruleId: "MCP010",
               title: "Rust MCP SDK on a pre-2026-07-28 line",
@@ -265,8 +266,9 @@ var rules = [
           continue;
         }
         if (dep.name === "rust-mcp-sdk") {
-          const majorMatch = dep.constraint.match(/\d+/);
-          const major = majorMatch ? Number.parseInt(majorMatch[0], 10) : NaN;
+          const majorMatch = dep.constraint.match(/^[~^]?(\d+)/);
+          if (!majorMatch) continue;
+          const major = Number.parseInt(majorMatch[1], 10);
           if (!Number.isNaN(major) && major >= 2) continue;
           return {
             ruleId: "MCP010",
@@ -651,7 +653,7 @@ function advertisedMetadataUrl(header) {
 // packages/core/src/scan.ts
 import { promises as fs } from "node:fs";
 import path from "node:path";
-var SCANNABLE = /* @__PURE__ */ new Set([".ts", ".tsx", ".js", ".mjs", ".cjs", ".py", ".go", ".rs", ".toml"]);
+var SCANNABLE = /* @__PURE__ */ new Set([".ts", ".tsx", ".js", ".mjs", ".cjs", ".py", ".go", ".rs"]);
 var IGNORED_DIRS = /* @__PURE__ */ new Set([
   "node_modules",
   ".git",
@@ -676,8 +678,8 @@ var IGNORED_DIRS = /* @__PURE__ */ new Set([
   "vendor"
 ]);
 var SIGNAL_PATTERNS = {
-  initialize: /InitializeRequest|oninitialized|on_initialized|ClientLifecycleMode::Initialize|notifications\/initialized|["']initialize["']|["']initialized["']/,
-  sessionId: /[Mm]cp-[Ss]ession-[Ii]d|mcpSessionId|with_stateful_mode|stateful_mode|with_legacy_session_mode|Last-Event-ID|SseServer|sse_support|mcp_session_id|get_session_id|session_id_generator|stateless_http\s*=\s*False|\bsessionId\b/,
+  initialize: /InitializeRequest|oninitialized|on_initialized|notifications\/initialized|["']initialize["']|["']initialized["']/,
+  sessionId: /[Mm]cp-[Ss]ession-[Ii]d|mcpSessionId|mcp_session_id|get_session_id|session_id_generator|stateless_http\s*=\s*False|\bsessionId\b/,
   logging: /["']logging["']|LoggingLevel|LoggingMessageNotification|send_log_message|\b(?:ctx|context)\.(?:debug|info|warning|error|critical|log)\s*\(|\blogging\b\s*:\s*\{/,
   sampling: /["']sampling["']|createMessage|create_message|SamplingMessage|\bsampling\b\s*:\s*\{/,
   roots: /["']roots["']|ListRootsRequest|RootsCapability|list_roots|\broots\b\s*:\s*\{/,
@@ -950,7 +952,8 @@ function parseCargoToml(content) {
   for (const line of lines) {
     const trimmed = line.trim();
     if (trimmed.startsWith("[")) {
-      inTable = trimmed === "[dependencies]" || trimmed === "[dev-dependencies]" || trimmed === "[workspace.dependencies]";
+      const section = trimmed.slice(1, -1).trim();
+      inTable = section === "dependencies" || section === "dev-dependencies" || section === "workspace.dependencies" || section.startsWith("dependencies.");
       continue;
     }
     if (!inTable) continue;

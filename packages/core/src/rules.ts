@@ -358,9 +358,10 @@ export const rules: Rule[] = [
         // rmcp 3.x IS the current line speaking spec 2026-07-28. Fire only on
         // major < 3 — using < 2 would repeat the MCP007 wrong-threshold bug.
         if (dep.name === "rmcp") {
-          const majorMatch = dep.constraint.match(/\d+/);
-          const major = majorMatch ? Number.parseInt(majorMatch[0], 10) : NaN;
-          if (typeof major === "number" && !Number.isNaN(major) && major < 3) {
+          const majorMatch = dep.constraint.match(/^[~^]?(\d+)/);
+          if (!majorMatch) continue; // Can't parse clearly, stay quiet
+          const major = Number.parseInt(majorMatch[1], 10);
+          if (!Number.isNaN(major) && major < 3) {
             return {
               ruleId: "MCP010",
               title: "Rust MCP SDK on a pre-2026-07-28 line",
@@ -376,8 +377,9 @@ export const rules: Rule[] = [
         }
         // rust-mcp-sdk v1.x only speaks 2025-11-25; any v1.x is pre-2026-07-28.
         if (dep.name === "rust-mcp-sdk") {
-          const majorMatch = dep.constraint.match(/\d+/);
-          const major = majorMatch ? Number.parseInt(majorMatch[0], 10) : NaN;
+          const majorMatch = dep.constraint.match(/^[~^]?(\d+)/);
+          if (!majorMatch) continue; // Can't parse clearly, stay quiet
+          const major = Number.parseInt(majorMatch[1], 10);
           if (!Number.isNaN(major) && major >= 2) continue; // v2.x speaks 2026-07-28
           return {
             ruleId: "MCP010",

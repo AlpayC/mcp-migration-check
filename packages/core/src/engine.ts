@@ -1,5 +1,5 @@
-import { rules } from './rules';
-import type { Finding, Grade, RuleContext, Severity } from './types';
+import { rules } from "./rules";
+import type { Finding, Grade, RuleContext, Severity } from "./types";
 
 /**
  * `info` costs nothing on purpose.
@@ -19,18 +19,14 @@ const PENALTY: Record<Severity, number> = {
 export function gradeFrom(findings: Finding[]): Grade {
   const deduction = findings.reduce((sum, f) => sum + PENALTY[f.severity], 0);
   const score = Math.max(0, 100 - deduction);
-  const letter: Grade['letter'] =
-    score >= 90 ? 'A'
-    : score >= 75 ? 'B'
-    : score >= 60 ? 'C'
-    : score >= 40 ? 'D'
-    : 'F';
+  const letter: Grade["letter"] =
+    score >= 90 ? "A" : score >= 75 ? "B" : score >= 60 ? "C" : score >= 40 ? "D" : "F";
   return { score, letter };
 }
 
 /** Run every rule over the context and return findings ordered by severity. */
 export function evaluate(ctx: RuleContext): Finding[] {
-  const order: Severity[] = ['critical', 'warning', 'info'];
+  const order: Severity[] = ["critical", "warning", "info"];
   return rules
     .map((r) => r.evaluate(ctx))
     .filter((f): f is Finding => f !== null)

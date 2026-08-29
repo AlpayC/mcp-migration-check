@@ -18,7 +18,7 @@ import type {
  * for runtime behavior; the two complement each other.
  */
 
-const SCANNABLE = new Set([".ts", ".tsx", ".js", ".mjs", ".cjs", ".py", ".go", ".rs", ".toml"]);
+const SCANNABLE = new Set([".ts", ".tsx", ".js", ".mjs", ".cjs", ".py", ".go", ".rs"]);
 const IGNORED_DIRS = new Set([
   "node_modules",
   ".git",
@@ -44,9 +44,9 @@ const IGNORED_DIRS = new Set([
 ]);
 
 const SIGNAL_PATTERNS: Record<string, RegExp> = {
-  initialize: /InitializeRequest|oninitialized|on_initialized|ClientLifecycleMode::Initialize|notifications\/initialized|["']initialize["']|["']initialized["']/,
+  initialize: /InitializeRequest|oninitialized|on_initialized|notifications\/initialized|["']initialize["']|["']initialized["']/,
   sessionId:
-    /[Mm]cp-[Ss]ession-[Ii]d|mcpSessionId|with_stateful_mode|stateful_mode|with_legacy_session_mode|Last-Event-ID|SseServer|sse_support|mcp_session_id|get_session_id|session_id_generator|stateless_http\s*=\s*False|\bsessionId\b/,
+    /[Mm]cp-[Ss]ession-[Ii]d|mcpSessionId|mcp_session_id|get_session_id|session_id_generator|stateless_http\s*=\s*False|\bsessionId\b/,
   logging:
     /["']logging["']|LoggingLevel|LoggingMessageNotification|send_log_message|\b(?:ctx|context)\.(?:debug|info|warning|error|critical|log)\s*\(|\blogging\b\s*:\s*\{/,
   sampling:
@@ -462,10 +462,12 @@ export function parseCargoToml(content: string): SdkDependency[] {
   for (const line of lines) {
     const trimmed = line.trim();
     if (trimmed.startsWith("[")) {
+      const section = trimmed.slice(1, -1).trim(); // Trim whitespace in brackets
       inTable =
-        trimmed === "[dependencies]" ||
-        trimmed === "[dev-dependencies]" ||
-        trimmed === "[workspace.dependencies]";
+        section === "dependencies" ||
+        section === "dev-dependencies" ||
+        section === "workspace.dependencies" ||
+        section.startsWith("dependencies."); // Handle sub-table form [dependencies.rmcp]
       continue;
     }
     if (!inTable) continue;
