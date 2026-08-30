@@ -28,6 +28,25 @@ jobs:
 
       - run: npm ci
 
+      # The npm package takes its version from this tag, so it cannot disagree
+      # with it. The plugin manifest is the exception: it is read straight out
+      # of the repository by everyone who installs the skill, so its version has
+      # to be committed and is therefore the one number here maintained by hand.
+      # Checked before anything is built — a mismatch found after the artifact
+      # is attached is a release that has to be redone.
+      - name: The plugin manifest agrees with the tag
+        env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          manifest=skill/.claude-plugin/plugin.json
+          declared=$(node -p "require('./$manifest').version ?? ''")
+          expected="${TAG#v}"
+          if [ "$declared" != "$expected" ]; then
+            echo "::error file=$manifest::plugin.json says \"$declared\", tag says \"$expected\". Bump the version in $manifest, commit it, and move the tag."
+            exit 1
+          fi
+          echo "plugin.json and $TAG agree on $expected"
+
       # A release is the one artifact strangers actually download, so it does
       # not get built from an unverified tree.
       - name: Typecheck
