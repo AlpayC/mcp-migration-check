@@ -6,7 +6,7 @@ publish = false
 
 # NOTE: this is TEST MATERIAL for the mcp-migration checker, not a real
 # project to "fix". The rmcp line below is deliberately old so the scan fires
-# MCP010; the session_id field is an admin-UI trap (see src/lib.rs).
+# MCP010; the session_id field is an admin-UI trap (see src/main.rs).
 
 [dependencies]
 rmcp = "1.2.0"

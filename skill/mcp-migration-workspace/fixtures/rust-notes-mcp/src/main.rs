@@ -6,12 +6,7 @@
 //! to migrate. An agent that tries to add session-id handling here has
 //! FAILED: this is the Rust twin of `notes-mcp`.
 
-use rmcp::{
-    ServerHandler, Server,
-    model::ServerInfo,
-    schemars, tool,
-    transport::stdio,
-};
+use rmcp::{tool, transport::stdio};
 
 /// Admin UI session (cookie-backed), unrelated to MCP.
 /// Do NOT confuse this with an MCP session id — there is none.
