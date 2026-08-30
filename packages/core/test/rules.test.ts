@@ -468,6 +468,47 @@ test("MCP010 needs a checkout — a live probe cannot see Cargo.toml", () => {
   assert.ok(!ids({ live: legacyOnly() }).includes("MCP010"));
 });
 
+test("MCP010 stays quiet on version ranges it cannot read unambiguously", () => {
+  // ">=1, <4" permits 3.x, which is clean. Guessing from the first digit run
+  // anywhere in the string graded those as stale.
+  for (const constraint of [">=1, <4", ">= 1.0", "*"]) {
+    const ctx = withRustDeps(rustSdkDep("rmcp", constraint));
+    assert.ok(
+      !ids({ source: ctx }).includes("MCP010"),
+      `MCP010 should not fire for rmcp "${constraint}"`,
+    );
+  }
+});
+
+test("MCP010 names the section when a crate is not a production dependency", () => {
+  const dev = { ...rustSdkDep("rmcp", "1.0.0"), section: "dev-dependencies" as const };
+  const f = evaluate({ source: withRustDeps(dev) }).find((x) => x.ruleId === "MCP010");
+  assert.ok(f);
+  assert.ok(
+    f.detail.includes("[dev-dependencies]"),
+    "the reader cannot judge the finding without the section",
+  );
+});
+
+test("MCP010 leaves the detail unqualified for a plain [dependencies] crate", () => {
+  const prod = { ...rustSdkDep("rmcp", "1.0.0"), section: "dependencies" as const };
+  const f = evaluate({ source: withRustDeps(prod) }).find((x) => x.ruleId === "MCP010");
+  assert.ok(f);
+  assert.ok(!f.detail.includes("under ["));
+});
+
+test("MCP010 reports every affected crate, not just the first", () => {
+  const ctx = withRustDeps(
+    rustSdkDep("rmcp", "1.0.0"),
+    rustSdkDep("tower-mcp", "1.0.0", ["sse"]),
+  );
+  const f = evaluate({ source: ctx }).find((x) => x.ruleId === "MCP010");
+  assert.ok(f);
+  assert.ok(f.detail.includes("rmcp"), "rmcp should be named");
+  assert.ok(f.detail.includes("tower-mcp"), "tower-mcp must not be hidden behind rmcp");
+  assert.ok(f.fix.includes("protocol-2026-07-28"), "both fixes should be offered");
+});
+
 test("no specRef relies on a page anchor", () => {
   // Regression guard: these used to be `…/2026-07-28#lifecycle` and friends,
   // which silently resolved to the overview page with a fragment that does not

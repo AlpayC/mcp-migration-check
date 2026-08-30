@@ -57,7 +57,6 @@ function render(result: CheckResult): string {
         out.push(`  see also: ${ref}`);
       }
     }
-    if (f.note) out.push(`  note:     ${f.note}`);
     out.push("");
   }
   // Provenance, not decoration: these citations were read on a date, and a rule

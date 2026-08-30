@@ -246,22 +246,20 @@ var rules = [
       const rustMcpDeps = deps.filter(
         (d) => d.ecosystem === "cargo" && RUST_MCP_CRATES.has(d.name)
       );
+      const where = (dep) => dep.section && dep.section !== "dependencies" ? ` under [${dep.section}]` : "";
+      const hits = [];
       for (const dep of rustMcpDeps) {
         if (dep.name === "rmcp") {
           const majorMatch = dep.constraint.match(/^[~^]?(\d+)/);
           if (!majorMatch) continue;
           const major = Number.parseInt(majorMatch[1], 10);
           if (!Number.isNaN(major) && major < 3) {
-            return {
-              ruleId: "MCP010",
-              title: "Rust MCP SDK on a pre-2026-07-28 line",
-              severity: "warning",
-              detail: `Cargo.toml depends on ${dep.name} (${dep.constraint}). That is a pre-2026-07-28 line; rmcp 3.x is the current line speaking spec 2026-07-28.`,
+            hits.push({
+              detail: `Cargo.toml depends on ${dep.name} (${dep.constraint})${where(dep)}. That is a pre-2026-07-28 line; rmcp 3.x is the current line speaking spec 2026-07-28.`,
               fix: "Upgrade rmcp to 3.x (the current line speaking spec 2026-07-28).",
               specRef: SPEC.rustSdk,
-              references: [SPEC.rustSdkReleases],
-              location: dep.manifest
-            };
+              refs: [SPEC.rustSdkReleases]
+            });
           }
           continue;
         }
@@ -270,34 +268,38 @@ var rules = [
           if (!majorMatch) continue;
           const major = Number.parseInt(majorMatch[1], 10);
           if (!Number.isNaN(major) && major >= 2) continue;
-          return {
-            ruleId: "MCP010",
-            title: "Rust MCP SDK on a pre-2026-07-28 line",
-            severity: "warning",
-            detail: `Cargo.toml depends on rust-mcp-sdk (${dep.constraint}). That crate only speaks the 2025-11-25 protocol; migrate to rmcp 3.x or rust-mcp-sdk 2.x.`,
+          hits.push({
+            detail: `Cargo.toml depends on rust-mcp-sdk (${dep.constraint})${where(dep)}. That crate only speaks the 2025-11-25 protocol; migrate to rmcp 3.x or rust-mcp-sdk 2.x.`,
             fix: "Upgrade to rmcp 3.x or rust-mcp-sdk 2.x (both speak 2026-07-28).",
             specRef: SPEC.rustMcpSdk,
-            references: [SPEC.rustSdk, SPEC.rustSdkReleases],
-            location: dep.manifest
-          };
+            refs: [SPEC.rustSdk, SPEC.rustSdkReleases]
+          });
+          continue;
         }
         if (dep.name === "tower-mcp") {
           if (dep.features && !dep.features.includes("protocol-2026-07-28")) {
-            return {
-              ruleId: "MCP010",
-              title: "Rust MCP SDK on a pre-2026-07-28 line",
-              severity: "warning",
-              detail: `Cargo.toml depends on tower-mcp (${dep.constraint}) without the protocol-2026-07-28 feature. That crate speaks 2026-07-28 only when that feature is enabled.`,
+            hits.push({
+              detail: `Cargo.toml depends on tower-mcp (${dep.constraint})${where(dep)} without the protocol-2026-07-28 feature. That crate speaks 2026-07-28 only when that feature is enabled.`,
               fix: "For tower-mcp, enable the protocol-2026-07-28 feature.",
               specRef: SPEC.towerMcp,
-              references: [SPEC.rustSdk, SPEC.rustSdkReleases],
-              location: dep.manifest
-            };
+              refs: [SPEC.rustSdk, SPEC.rustSdkReleases]
+            });
           }
           continue;
         }
       }
-      return null;
+      if (hits.length === 0) return null;
+      return {
+        ruleId: "MCP010",
+        title: "Rust MCP SDK on a pre-2026-07-28 line",
+        severity: "warning",
+        detail: hits.map((h) => h.detail).join(" "),
+        fix: hits.map((h) => h.fix).join(" "),
+        // One crate cites its own repo; several cite the SDK index instead.
+        specRef: hits.length === 1 ? hits[0].specRef : SPEC.rustSdk,
+        references: [...new Set(hits.flatMap((h) => h.refs))],
+        location: "Cargo.toml"
+      };
     }
   },
   // ---- Observations (MCP1xx) ----------------------------------------------
@@ -944,49 +946,94 @@ async function readPackageJson(dir) {
     return { sdkVersion: null, modernPackages: [] };
   }
 }
+var MCP_CRATES = /* @__PURE__ */ new Set(["rmcp", "rust-mcp-sdk", "tower-mcp"]);
+var CARGO_SECTIONS = /* @__PURE__ */ new Set([
+  "dependencies",
+  "dev-dependencies",
+  "workspace.dependencies"
+]);
+function parseCargoSection(header) {
+  const inner = header.replace(/^\[|\]$/g, "").trim();
+  if (CARGO_SECTIONS.has(inner)) {
+    return { section: inner, crate: null };
+  }
+  const dot = inner.lastIndexOf(".");
+  if (dot === -1) return null;
+  const section = inner.slice(0, dot).trim();
+  if (!CARGO_SECTIONS.has(section)) return null;
+  const crate = inner.slice(dot + 1).trim();
+  return crate ? { section, crate } : null;
+}
+function parseCargoFeatures(body) {
+  const match = body.match(/features\s*=\s*\[([^\]]*)\]/);
+  if (!match) return [];
+  const features = [];
+  for (const part of match[1].split(",")) {
+    const feature = part.trim().replace(/^"|"$/g, "");
+    if (feature) features.push(feature);
+  }
+  return features;
+}
 function parseCargoToml(content) {
-  const ALLOWED = /* @__PURE__ */ new Set(["rmcp", "rust-mcp-sdk", "tower-mcp"]);
   const lines = content.split(/\r?\n/);
   const deps = [];
-  let inTable = false;
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (trimmed.startsWith("[")) {
-      const section = trimmed.slice(1, -1).trim();
-      inTable = section === "dependencies" || section === "dev-dependencies" || section === "workspace.dependencies" || section.startsWith("dependencies.");
-      continue;
-    }
-    if (!inTable) continue;
-    const m = trimmed.match(/^([A-Za-z0-9_-]+)\s*=\s*(.+)$/);
-    if (!m) continue;
-    const name = m[1];
-    if (!ALLOWED.has(name)) continue;
-    const rhs = m[2].trim();
-    let constraint = "";
-    const features = [];
-    if (rhs.startsWith("{")) {
-      const v = rhs.match(/version\s*=\s*"([^"]*)"/);
-      if (v) constraint = v[1];
-      const f = rhs.match(/features\s*=\s*\[([^\]]*)\]/);
-      if (f) {
-        for (const part of f[1].split(",")) {
-          const feat = part.trim().replace(/^"|"$/g, "");
-          if (feat) features.push(feat);
-        }
-      }
-    } else {
-      const v = rhs.match(/^"([^"]*)"$/);
-      if (v) constraint = v[1];
-    }
-    if (!constraint) continue;
+  let section = null;
+  let subTable = null;
+  const push = (crate, body, declaredIn) => {
+    if (!MCP_CRATES.has(crate)) return;
+    const version = body.match(/version\s*=\s*"([^"]*)"/);
+    if (!version) return;
+    const features = parseCargoFeatures(body);
     deps.push({
       ecosystem: "cargo",
-      name,
-      constraint,
+      name: crate,
+      constraint: version[1],
       manifest: "Cargo.toml",
+      section: declaredIn,
       ...features.length ? { features } : {}
     });
+  };
+  const closeSubTable = () => {
+    if (subTable && section) push(subTable.crate, subTable.body, section);
+    subTable = null;
+  };
+  for (let i = 0; i < lines.length; i++) {
+    const trimmed = lines[i].trim();
+    if (trimmed.startsWith("[")) {
+      closeSubTable();
+      const parsed = parseCargoSection(trimmed);
+      section = parsed ? parsed.section : null;
+      if (parsed?.crate) subTable = { crate: parsed.crate, body: "" };
+      continue;
+    }
+    if (!section) continue;
+    if (subTable) {
+      subTable.body += `${trimmed}
+`;
+      continue;
+    }
+    const entry = trimmed.match(/^([A-Za-z0-9_-]+)\s*=\s*(.+)$/);
+    if (!entry) continue;
+    const name = entry[1];
+    if (!MCP_CRATES.has(name)) continue;
+    let rhs = entry[2].trim();
+    if (rhs.startsWith("{") && !rhs.includes("}")) {
+      while (i + 1 < lines.length) {
+        const next = lines[i + 1].trim();
+        if (next.startsWith("[")) break;
+        i++;
+        rhs += ` ${next}`;
+        if (next.includes("}")) break;
+      }
+    }
+    if (rhs.startsWith("{")) {
+      push(name, rhs, section);
+      continue;
+    }
+    const inlineVersion = rhs.match(/^"([^"]*)"$/);
+    if (inlineVersion) push(name, `version = "${inlineVersion[1]}"`, section);
   }
+  closeSubTable();
   return deps;
 }
 async function readCargoDependencies(dir) {
@@ -1221,7 +1268,6 @@ function render(result) {
         out.push(`  see also: ${ref}`);
       }
     }
-    if (f.note) out.push(`  note:     ${f.note}`);
     out.push("");
   }
   out.push(`Rules last verified against the spec: ${rulesVerifiedAt}`);

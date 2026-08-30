@@ -229,3 +229,94 @@ test("parseCargoToml handles Windows line endings", () => {
   assert.equal(deps.length, 1);
   assert.equal(deps[0].constraint, "3.0.0");
 });
+
+// The three forms that graded A in silence. The sub-table is the common one in
+// real manifests, which made it the worst of the three to miss.
+
+test("parseCargoToml handles the [dependencies.rmcp] sub-table", () => {
+  const content = [
+    "[dependencies.rmcp]",
+    'version = "1.2.0"',
+    'features = ["server"]',
+  ].join("\n");
+  const deps = parseCargoToml(content);
+  assert.equal(deps.length, 1);
+  assert.equal(deps[0].name, "rmcp");
+  assert.equal(deps[0].constraint, "1.2.0");
+  assert.deepEqual(deps[0].features, ["server"]);
+  assert.equal(deps[0].section, "dependencies");
+});
+
+test("parseCargoToml reads a sub-table under dev-dependencies", () => {
+  const content = ["[dev-dependencies.rmcp]", 'version = "1.0.0"'].join("\n");
+  const deps = parseCargoToml(content);
+  assert.equal(deps.length, 1);
+  assert.equal(deps[0].section, "dev-dependencies");
+});
+
+test("parseCargoToml ignores a sub-table for an unsupported crate", () => {
+  const content = ["[dependencies.serde]", 'version = "1.0"'].join("\n");
+  assert.deepEqual(parseCargoToml(content), []);
+});
+
+test("parseCargoToml closes a sub-table at the next section header", () => {
+  const content = [
+    "[dependencies.rmcp]",
+    'version = "1.2.0"',
+    "",
+    "[package]",
+    'version = "9.9.9"',
+  ].join("\n");
+  const deps = parseCargoToml(content);
+  assert.equal(deps.length, 1);
+  assert.equal(deps[0].constraint, "1.2.0", "the [package] version must not leak in");
+});
+
+test("parseCargoToml handles a multi-line inline table", () => {
+  const content = [
+    "[dependencies]",
+    "rmcp = {",
+    '  version = "1.2.0",',
+    '  features = ["server"]',
+    "}",
+  ].join("\n");
+  const deps = parseCargoToml(content);
+  assert.equal(deps.length, 1);
+  assert.equal(deps[0].constraint, "1.2.0");
+  assert.deepEqual(deps[0].features, ["server"]);
+});
+
+test("parseCargoToml tolerates whitespace inside section brackets", () => {
+  const content = ["[ dependencies ]", 'rmcp = "1.2.0"'].join("\n");
+  const deps = parseCargoToml(content);
+  assert.equal(deps.length, 1);
+  assert.equal(deps[0].constraint, "1.2.0");
+});
+
+test("parseCargoToml records the section each dependency came from", () => {
+  const deps = parseCargoToml(CARGO_MIXED);
+  assert.equal(deps[0].section, "dependencies");
+  assert.equal(deps[1].section, "dependencies");
+  assert.equal(deps[2].section, "dev-dependencies");
+});
+
+test("parseCargoToml ignores a target-specific sub-table", () => {
+  const content = [
+    "[target.'cfg(unix)'.dependencies.rmcp]",
+    'version = "1.0.0"',
+  ].join("\n");
+  assert.deepEqual(parseCargoToml(content), []);
+});
+
+test("parseCargoToml does not let an unterminated table swallow later sections", () => {
+  const content = [
+    "[dependencies]",
+    "rmcp = {",
+    '  version = "1.2.0"',
+    "[package]",
+    'name = "demo"',
+  ].join("\n");
+  const deps = parseCargoToml(content);
+  assert.equal(deps.length, 1);
+  assert.equal(deps[0].constraint, "1.2.0");
+});

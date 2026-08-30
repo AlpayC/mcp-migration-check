@@ -23,8 +23,6 @@ export interface Finding {
   references?: string[];
   /** "live endpoint" or a `file:line` reference for source findings. */
   location?: string;
-  /** Optional annotation, e.g. why a finding was down-ranked. */
-  note?: string;
 }
 
 export interface Grade {
@@ -62,6 +60,15 @@ export type ServerEra = "modern" | "legacy" | "dual" | "unknown";
 /** Package ecosystem that declared an MCP SDK dependency. */
 export type Ecosystem = "npm" | "cargo"; // extensible: "pypi" | "go" | "nuget"
 
+/**
+ * Cargo section a dependency was declared under.
+ *
+ * The distinction is not cosmetic: a crate under `dev-dependencies` never ships,
+ * and one under `workspace.dependencies` need not be used by any member. A
+ * finding has to say which it read, or the reader cannot judge it.
+ */
+export type CargoSection = "dependencies" | "dev-dependencies" | "workspace.dependencies";
+
 /** A single declared MCP SDK dependency, normalized across manifest kinds. */
 export interface SdkDependency {
   ecosystem: Ecosystem;
@@ -73,6 +80,8 @@ export interface SdkDependency {
   manifest: string; // "package.json" | "Cargo.toml"
   /** Cargo feature flags, when the manifest expresses them. */
   features?: string[];
+  /** Cargo section it was declared under; absent for npm. */
+  section?: CargoSection;
 }
 
 /** Normalized observations from probing a running MCP server over HTTP. */
@@ -147,7 +156,7 @@ export interface SourceContext {
   sdkVersion: string | null;
   /** Direct `mcp` dependencies found in Python project metadata. */
   pythonSdkRequirements?: PythonSdkRequirement[];
-  /** All MCP SDK dependencies found across every manifest kind (npm + cargo). */
+  /** MCP SDK crates read from `Cargo.toml`; npm goes through `sdkVersion`. */
   sdkDependencies?: SdkDependency[];
   filesScanned: number;
 }

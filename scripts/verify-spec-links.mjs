@@ -45,8 +45,10 @@ const MARKERS = {
     "Migration Guide: v1 to v2",
   "https://github.com/modelcontextprotocol/rust-sdk":
     "official Rust Model Context Protocol SDK",
+  // The release tag prefix, not the word "Releases": that sits in the nav of
+  // every GitHub page and would pass on a 404 shell.
   "https://github.com/modelcontextprotocol/rust-sdk/releases":
-    "Releases",
+    "rmcp-v",
   "https://github.com/joshrotenberg/tower-mcp":
     "Tower-native Model Context Protocol",
   "https://github.com/rust-mcp-stack/rust-mcp-sdk":

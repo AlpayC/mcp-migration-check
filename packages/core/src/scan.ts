@@ -1,6 +1,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import type {
+  CargoSection,
   PythonSdkLine,
   PythonSdkRequirement,
   SdkDependency,
@@ -426,81 +427,144 @@ async function readPackageJson(
   }
 }
 
+/** Crates this project recognises as MCP server frameworks. */
+const MCP_CRATES = new Set(["rmcp", "rust-mcp-sdk", "tower-mcp"]);
+
+/** Dependency sections a root manifest can declare. */
+const CARGO_SECTIONS = new Set<CargoSection>([
+  "dependencies",
+  "dev-dependencies",
+  "workspace.dependencies",
+]);
+
 /**
- * Read MCP-relevant crate dependencies from a `Cargo.toml`.
+ * Split a section header into the dependency section it belongs to and, for the
+ * sub-table form, the crate it configures.
  *
- * Dependency-free, line-oriented parse: no TOML crate may be added because the
- * skill bundle must stay lean. Only the three MCP framework crates are emitted;
- * `mcp-server` (stale) and `rig-core` (not an MCP framework) are skipped. Both
- * the inline-string form (`rmcp = "3.1.4"`) and the table form
- * (`rmcp = { version = "3", features = [...] }`) are handled. Tolerant like
- * `readSdkVersion`: a missing or unparseable manifest yields `[]`.
+ * `[dependencies]`      -> { section: "dependencies", crate: null }
+ * `[dependencies.rmcp]` -> { section: "dependencies", crate: "rmcp" }
+ * `[package]`, `[target.'cfg(unix)'.dependencies]` -> null
+ *
+ * The last dot separates the crate, so `[workspace.dependencies.rmcp]` splits
+ * correctly even though the section name itself contains one.
  */
+function parseCargoSection(
+  header: string,
+): { section: CargoSection; crate: string | null } | null {
+  const inner = header.replace(/^\[|\]$/g, "").trim();
+  if (CARGO_SECTIONS.has(inner as CargoSection)) {
+    return { section: inner as CargoSection, crate: null };
+  }
+  const dot = inner.lastIndexOf(".");
+  if (dot === -1) return null;
+  const section = inner.slice(0, dot).trim();
+  if (!CARGO_SECTIONS.has(section as CargoSection)) return null;
+  const crate = inner.slice(dot + 1).trim();
+  return crate ? { section: section as CargoSection, crate } : null;
+}
+
+/** Feature flags out of a `features = ["a", "b"]` fragment. */
+function parseCargoFeatures(body: string): string[] {
+  const match = body.match(/features\s*=\s*\[([^\]]*)\]/);
+  if (!match) return [];
+  const features: string[] = [];
+  for (const part of match[1].split(",")) {
+    const feature = part.trim().replace(/^"|"$/g, "");
+    if (feature) features.push(feature);
+  }
+  return features;
+}
+
 /**
- * Parse MCP-relevant crate dependencies from Cargo.toml content.
+ * Parse MCP-relevant crate dependencies from `Cargo.toml` content.
  *
- * Pure, line-oriented, dependency-free: no TOML crate may be added because
- * the skill bundle must stay lean. Only the three MCP framework crates are
- * emitted; `mcp-server` (stale) and `rig-core` (not an MCP framework) are
- * skipped. Both the inline-string form (`rmcp = "3.1.4"`) and the table form
- * (`rmcp = { version = "3", features = [...] }`) are handled.
+ * Pure, line-oriented, dependency-free: no TOML crate may be added because the
+ * skill bundle must stay lean. Only the three MCP framework crates are emitted;
+ * `mcp-server` (stale) and `rig-core` (not an MCP framework) are skipped.
  *
- * Documented scope:
- * - Sections: `[dependencies]`, `[dev-dependencies]`, `[workspace.dependencies]`
+ * Handled:
+ * - Sections `[dependencies]`, `[dev-dependencies]`, `[workspace.dependencies]`,
+ *   with whitespace inside the brackets
  * - Inline string: `rmcp = "3.1.4"`
- * - Table: `rmcp = { version = "3", features = ["sse"] }`
- * - Recognised crates: `rmcp`, `rust-mcp-sdk`, `tower-mcp`
- * - Ignored: any other crate name, `workspace = true`, renamed deps,
- *   target-specific sections (`[target.*.dependencies]`), complex version
- *   ranges without a quoted string (e.g. `{ git = "…" }` with no version).
+ * - Inline table: `rmcp = { version = "3", features = ["sse"] }`, on one line or
+ *   wrapped across several
+ * - Sub-table: `[dependencies.rmcp]` with `version` and `features` as keys
+ *
+ * Ignored: any other crate name, `workspace = true`, renamed dependencies,
+ * target-specific sections (`[target.*.dependencies]`), and dependencies with
+ * no quoted version (e.g. `{ git = "…" }`).
  */
 export function parseCargoToml(content: string): SdkDependency[] {
-  const ALLOWED = new Set(["rmcp", "rust-mcp-sdk", "tower-mcp"]);
   const lines = content.split(/\r?\n/);
   const deps: SdkDependency[] = [];
-  let inTable = false;
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (trimmed.startsWith("[")) {
-      const section = trimmed.slice(1, -1).trim(); // Trim whitespace in brackets
-      inTable =
-        section === "dependencies" ||
-        section === "dev-dependencies" ||
-        section === "workspace.dependencies" ||
-        section.startsWith("dependencies."); // Handle sub-table form [dependencies.rmcp]
-      continue;
-    }
-    if (!inTable) continue;
-    const m = trimmed.match(/^([A-Za-z0-9_-]+)\s*=\s*(.+)$/);
-    if (!m) continue;
-    const name = m[1];
-    if (!ALLOWED.has(name)) continue;
-    const rhs = m[2].trim();
-    let constraint = "";
-    const features: string[] = [];
-    if (rhs.startsWith("{")) {
-      const v = rhs.match(/version\s*=\s*"([^"]*)"/);
-      if (v) constraint = v[1];
-      const f = rhs.match(/features\s*=\s*\[([^\]]*)\]/);
-      if (f) {
-        for (const part of f[1].split(",")) {
-          const feat = part.trim().replace(/^"|"$/g, "");
-          if (feat) features.push(feat);
-        }
-      }
-    } else {
-      const v = rhs.match(/^"([^"]*)"$/);
-      if (v) constraint = v[1];
-    }
-    if (!constraint) continue;
+
+  let section: CargoSection | null = null;
+  let subTable: { crate: string; body: string } | null = null;
+
+  const push = (crate: string, body: string, declaredIn: CargoSection) => {
+    if (!MCP_CRATES.has(crate)) return;
+    const version = body.match(/version\s*=\s*"([^"]*)"/);
+    if (!version) return;
+    const features = parseCargoFeatures(body);
     deps.push({
       ecosystem: "cargo",
-      name,
-      constraint,
+      name: crate,
+      constraint: version[1],
       manifest: "Cargo.toml",
+      section: declaredIn,
       ...(features.length ? { features } : {}),
     });
+  };
+
+  // A sub-table stays open until the next header or the end of the file.
+  const closeSubTable = () => {
+    if (subTable && section) push(subTable.crate, subTable.body, section);
+    subTable = null;
+  };
+
+  for (let i = 0; i < lines.length; i++) {
+    const trimmed = lines[i].trim();
+
+    if (trimmed.startsWith("[")) {
+      closeSubTable();
+      const parsed = parseCargoSection(trimmed);
+      section = parsed ? parsed.section : null;
+      if (parsed?.crate) subTable = { crate: parsed.crate, body: "" };
+      continue;
+    }
+    if (!section) continue;
+    if (subTable) {
+      subTable.body += `${trimmed}\n`;
+      continue;
+    }
+
+    const entry = trimmed.match(/^([A-Za-z0-9_-]+)\s*=\s*(.+)$/);
+    if (!entry) continue;
+    const name = entry[1];
+    if (!MCP_CRATES.has(name)) continue;
+
+    let rhs = entry[2].trim();
+    // An inline table may wrap across lines. Read on until it closes, but stop
+    // at the next header so an unterminated table cannot swallow the file.
+    if (rhs.startsWith("{") && !rhs.includes("}")) {
+      while (i + 1 < lines.length) {
+        const next = lines[i + 1].trim();
+        if (next.startsWith("[")) break;
+        i++;
+        rhs += ` ${next}`;
+        if (next.includes("}")) break;
+      }
+    }
+
+    if (rhs.startsWith("{")) {
+      push(name, rhs, section);
+      continue;
+    }
+    const inlineVersion = rhs.match(/^"([^"]*)"$/);
+    if (inlineVersion) push(name, `version = "${inlineVersion[1]}"`, section);
   }
+
+  closeSubTable();
   return deps;
 }
 

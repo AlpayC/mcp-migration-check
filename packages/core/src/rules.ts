@@ -1,4 +1,4 @@
-import type { Finding, Rule, RuleContext, SourceMatch } from "./types";
+import type { Finding, Rule, RuleContext, SdkDependency, SourceMatch } from "./types";
 
 /**
  * Rules for the MCP 2026-07-28 specification break.
@@ -354,6 +354,17 @@ export const rules: Rule[] = [
       const rustMcpDeps = deps.filter(
         (d) => d.ecosystem === "cargo" && RUST_MCP_CRATES.has(d.name),
       );
+
+      // A crate outside [dependencies] does not ship, or need not be used by
+      // any workspace member. Naming the section lets the reader judge it
+      // instead of reading every hit as a production problem.
+      const where = (dep: SdkDependency): string =>
+        dep.section && dep.section !== "dependencies" ? ` under [${dep.section}]` : "";
+
+      // Every affected crate is collected: reporting only the first hides the
+      // second until the first is fixed.
+      const hits: { detail: string; fix: string; specRef: string; refs: string[] }[] = [];
+
       for (const dep of rustMcpDeps) {
         // rmcp 3.x IS the current line speaking spec 2026-07-28. Fire only on
         // major < 3 — using < 2 would repeat the MCP007 wrong-threshold bug.
@@ -362,16 +373,12 @@ export const rules: Rule[] = [
           if (!majorMatch) continue; // Can't parse clearly, stay quiet
           const major = Number.parseInt(majorMatch[1], 10);
           if (!Number.isNaN(major) && major < 3) {
-            return {
-              ruleId: "MCP010",
-              title: "Rust MCP SDK on a pre-2026-07-28 line",
-              severity: "warning",
-              detail: `Cargo.toml depends on ${dep.name} (${dep.constraint}). That is a pre-2026-07-28 line; rmcp 3.x is the current line speaking spec 2026-07-28.`,
+            hits.push({
+              detail: `Cargo.toml depends on ${dep.name} (${dep.constraint})${where(dep)}. That is a pre-2026-07-28 line; rmcp 3.x is the current line speaking spec 2026-07-28.`,
               fix: "Upgrade rmcp to 3.x (the current line speaking spec 2026-07-28).",
               specRef: SPEC.rustSdk,
-              references: [SPEC.rustSdkReleases],
-              location: dep.manifest,
-            };
+              refs: [SPEC.rustSdkReleases],
+            });
           }
           continue;
         }
@@ -381,37 +388,42 @@ export const rules: Rule[] = [
           if (!majorMatch) continue; // Can't parse clearly, stay quiet
           const major = Number.parseInt(majorMatch[1], 10);
           if (!Number.isNaN(major) && major >= 2) continue; // v2.x speaks 2026-07-28
-          return {
-            ruleId: "MCP010",
-            title: "Rust MCP SDK on a pre-2026-07-28 line",
-            severity: "warning",
-            detail: `Cargo.toml depends on rust-mcp-sdk (${dep.constraint}). That crate only speaks the 2025-11-25 protocol; migrate to rmcp 3.x or rust-mcp-sdk 2.x.`,
+          hits.push({
+            detail: `Cargo.toml depends on rust-mcp-sdk (${dep.constraint})${where(dep)}. That crate only speaks the 2025-11-25 protocol; migrate to rmcp 3.x or rust-mcp-sdk 2.x.`,
             fix: "Upgrade to rmcp 3.x or rust-mcp-sdk 2.x (both speak 2026-07-28).",
             specRef: SPEC.rustMcpSdk,
-            references: [SPEC.rustSdk, SPEC.rustSdkReleases],
-            location: dep.manifest,
-          };
+            refs: [SPEC.rustSdk, SPEC.rustSdkReleases],
+          });
+          continue;
         }
         // tower-mcp opts into the current spec via the protocol-2026-07-28
         // feature. Fire ONLY when features are parsed AND the flag is absent;
         // an unparsed dependency is silently skipped (no false positive).
         if (dep.name === "tower-mcp") {
           if (dep.features && !dep.features.includes("protocol-2026-07-28")) {
-            return {
-              ruleId: "MCP010",
-              title: "Rust MCP SDK on a pre-2026-07-28 line",
-              severity: "warning",
-              detail: `Cargo.toml depends on tower-mcp (${dep.constraint}) without the protocol-2026-07-28 feature. That crate speaks 2026-07-28 only when that feature is enabled.`,
+            hits.push({
+              detail: `Cargo.toml depends on tower-mcp (${dep.constraint})${where(dep)} without the protocol-2026-07-28 feature. That crate speaks 2026-07-28 only when that feature is enabled.`,
               fix: "For tower-mcp, enable the protocol-2026-07-28 feature.",
               specRef: SPEC.towerMcp,
-              references: [SPEC.rustSdk, SPEC.rustSdkReleases],
-              location: dep.manifest,
-            };
+              refs: [SPEC.rustSdk, SPEC.rustSdkReleases],
+            });
           }
           continue;
         }
       }
-      return null;
+
+      if (hits.length === 0) return null;
+      return {
+        ruleId: "MCP010",
+        title: "Rust MCP SDK on a pre-2026-07-28 line",
+        severity: "warning",
+        detail: hits.map((h) => h.detail).join(" "),
+        fix: hits.map((h) => h.fix).join(" "),
+        // One crate cites its own repo; several cite the SDK index instead.
+        specRef: hits.length === 1 ? hits[0].specRef : SPEC.rustSdk,
+        references: [...new Set(hits.flatMap((h) => h.refs))],
+        location: "Cargo.toml",
+      };
     },
   },
 

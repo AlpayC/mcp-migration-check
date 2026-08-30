@@ -435,9 +435,15 @@ For `rust-mcp-sdk`, upgrade to 2.x (which speaks 2026-07-28) or migrate to
 repository.
 
 **Telling real from noise.** The rule checks `Cargo.toml` dependency
-declarations, not source imports. A workspace member that pins an old version
-for testing purposes may fire; use the reported `file:line` to decide whether
-that manifest ships the server under review.
+declarations, not source imports. A crate declared outside `[dependencies]` does
+not necessarily ship: one under `[dev-dependencies]` never reaches a release
+build, and one under `[workspace.dependencies]` need not be used by any member.
+The finding names the section it read whenever it is not a plain
+`[dependencies]`, so the `detail` line tells you which case you are looking at.
+
+When several crates are affected, the finding names all of them rather than
+stopping at the first — a stale `rmcp` alongside a misconfigured `tower-mcp`
+reports both.
 
 For `tower-mcp`, the rule can only report a missing `protocol-2026-07-28`
 feature when it has actually parsed a feature list that omits it. A bare
@@ -451,10 +457,12 @@ negatives.
 The `Cargo.toml` parser is dependency-free and line-oriented by design (the
 skill bundle must stay lean). It understands exactly these constructs:
 
-- **Sections:** `[dependencies]`, `[dev-dependencies]`,`
-  `[workspace.dependencies]`
-- **Forms:** inline string (`rmcp = "3.1.4"`) and inline table
-  (`rmcp = { version = "3", features = [...] }`)
+- **Sections:** `[dependencies]`, `[dev-dependencies]`,
+  `[workspace.dependencies]`, with whitespace inside the brackets
+- **Forms:** inline string (`rmcp = "3.1.4"`), inline table
+  (`rmcp = { version = "3", features = [...] }`) on one line or wrapped across
+  several, and the sub-table (`[dependencies.rmcp]` with `version` and
+  `features` as keys)
 - **Crates:** only `rmcp`, `rust-mcp-sdk`, and `tower-mcp` — other
   dependencies are silently skipped
 
@@ -468,8 +476,10 @@ It does **not** handle:
   `rmcp.workspace = true` without a version in the same manifest is skipped
 - **Target-specific tables** — `[target.'cfg(...)'.dependencies]` and similar
   are not scanned
-- **Complex version syntax** — only the first semver-compatible version string
-  is extracted; range operators beyond the bare version are not interpreted
+- **Version ranges it cannot read unambiguously** — the major is taken from the
+  start of the constraint, optionally behind a `^` or `~`. A range such as
+  `">=1, <4"` permits a clean 3.x, so the rule stays quiet rather than guessing
+  from it.
 
 A finding therefore proves that the **root `Cargo.toml`** declares one of the
 three crates at a version the rule considers pre-2026-07-28. Absence of a

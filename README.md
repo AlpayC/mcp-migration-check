@@ -46,6 +46,24 @@ answer *"am I broken?"*. The Action asks that question again on every commit.
 The skill sees the code and answers *"fix it"* — which is the part that actually
 takes a week.
 
+### Languages
+
+A source scan reads **TypeScript, Python, and Rust** MCP servers, each with a
+dependency check against the manifest that pins its SDK:
+
+| Language                    | Manifest read                                              | SDK rule   |
+| --------------------------- | ---------------------------------------------------------- | ---------- |
+| **TypeScript / JavaScript** | `package.json`                                              | **MCP007** |
+| **Python**                  | `pyproject.toml`, `requirements*.txt`, `Pipfile`, `setup.cfg` | **MCP009** |
+| **Rust**                    | `Cargo.toml`                                                | **MCP010** |
+| Go                          | —                                                           | none yet   |
+
+Every language above is also grepped for the protocol signals behind
+MCP001–MCP005, which are language-neutral. Go source is scanned for those
+signals too, but no Go SDK rule exists yet: that SDK moved to a 1.x minor rather
+than a new major, so the TypeScript and Python migration advice does not carry
+over. A live probe needs no language at all — it only speaks HTTP.
+
 ---
 
 ## Quick start
@@ -175,9 +193,11 @@ node skill/mcp-migration/scripts/mcpcheck.mjs --local http://localhost:3000/mcp
 | MCP102 | info     | session ids issued to legacy clients only                            |
 
 Live checks observe runtime behavior over HTTP; source scans grep for the same
-signals in code. For Python they also inspect `pyproject.toml`, requirements
-files, `Pipfile`, and `setup.cfg`, including those in nested projects. Each
-finding links the spec or official SDK migration page it derives from.
+signals in code. Beside the source they read each language's manifest — Python's
+`pyproject.toml`, requirements files, `Pipfile` and `setup.cfg` (including
+nested projects), and Rust's `Cargo.toml` — for the SDK rules in
+[Languages](#languages). Each finding links the spec or official SDK migration
+page it derives from.
 
 **Backwards compatibility is not a finding.** The `MCP1xx` rules are
 observations and cost zero points. `2026-07-28` says a server that wants to
@@ -215,10 +235,14 @@ the absence of the modern surface is a defect.
   SDK-version finding. Those SDKs moved differently, so do not apply the
   TypeScript or Python migration advice to them.
 - **The Rust `Cargo.toml` parser is line-oriented and reads only the root
-  manifest.** It does not see workspace member inheritance (`workspace = true`),
-  renamed dependencies (`package = "rmcp"`), or target-specific tables. A clean
-  MCP010 result means the root manifest is clean — workspace-inherited
-  dependencies may still use an older crate version.
+  manifest.** It reads `[dependencies]`, `[dev-dependencies]` and
+  `[workspace.dependencies]`, in the inline-string, inline-table and
+  `[dependencies.rmcp]` sub-table forms, and names the section in the finding.
+  It does not see workspace member inheritance (`workspace = true`), renamed
+  dependencies (`package = "rmcp"`), target-specific tables, or a dependency
+  with no quoted version (`{ git = "…" }`). A clean MCP010 result means the root
+  manifest is clean — workspace-inherited dependencies may still use an older
+  crate version.
 
 ## Two rules that were wrong
 

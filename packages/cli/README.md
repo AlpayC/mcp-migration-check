@@ -44,6 +44,11 @@ mcp-migration-check --local <url>    Allow localhost/private targets (SSRF guard
 mcp-migration-check ... --json       Machine-readable output
 ```
 
+A source scan covers **TypeScript, Python, and Rust** servers, reading
+`package.json`, Python project metadata and `Cargo.toml` respectively for the
+SDK rules below. Go source is scanned for the language-neutral signals, but has
+no SDK rule yet. A live probe works against any server, in any language.
+
 Exit codes: `0` no critical findings · `1` at least one critical finding ·
 `2` inconclusive (unreachable, blocked, or nothing to scan). That makes it
 usable as a CI gate directly, or via the
