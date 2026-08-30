@@ -19,6 +19,7 @@ import { Marquee } from "@/components/ui/marquee";
 import { NumberTicker } from "@/components/ui/number-ticker";
 import { Ripple } from "@/components/ui/ripple";
 import { RippleButton } from "@/components/ui/ripple-button";
+import { count, share, SNAPSHOT } from "@/lib/ecosystem-snapshot";
 import {
   AUTHOR_URL,
   ECOSYSTEM_REPORT_URL,
@@ -81,22 +82,23 @@ const SEV_STYLES: Record<Severity, { chip: string; edge: string }> = {
  * is whatever the checker actually observes. Keeping the label factual avoids
  * baking a prediction into the UI that a rule change could falsify.
  */
-const EXAMPLES: Array<{ label: string; url: string; auth: "open" | "oauth" }> = [
-  { label: "DeepWiki", url: "https://mcp.deepwiki.com/mcp", auth: "open" },
-  {
-    label: "Cloudflare Docs",
-    url: "https://docs.mcp.cloudflare.com/mcp",
-    auth: "open",
-  },
-  {
-    label: "Microsoft Learn",
-    url: "https://learn.microsoft.com/api/mcp",
-    auth: "open",
-  },
-  { label: "Notion", url: "https://mcp.notion.com/mcp", auth: "oauth" },
-  { label: "Linear", url: "https://mcp.linear.app/mcp", auth: "oauth" },
-  { label: "Sentry", url: "https://mcp.sentry.dev/mcp", auth: "oauth" },
-];
+const EXAMPLES: Array<{ label: string; url: string; auth: "open" | "oauth" }> =
+  [
+    { label: "DeepWiki", url: "https://mcp.deepwiki.com/mcp", auth: "open" },
+    {
+      label: "Cloudflare Docs",
+      url: "https://docs.mcp.cloudflare.com/mcp",
+      auth: "open",
+    },
+    {
+      label: "Microsoft Learn",
+      url: "https://learn.microsoft.com/api/mcp",
+      auth: "open",
+    },
+    { label: "Notion", url: "https://mcp.notion.com/mcp", auth: "oauth" },
+    { label: "Linear", url: "https://mcp.linear.app/mcp", auth: "oauth" },
+    { label: "Sentry", url: "https://mcp.sentry.dev/mcp", auth: "oauth" },
+  ];
 
 /**
  * Languages a source scan reads, each with the rule that checks its SDK
@@ -231,10 +233,10 @@ export default function Home() {
 
         <BlurFade delay={0.22}>
           <p className="mx-auto mt-5 max-w-[58ch] text-balance text-center text-[17px] leading-relaxed text-muted">
-            The 2026-07-28 revision made MCP stateless, formalized OAuth 2.1, and
-            dropped several capabilities — a refactor, not a version bump. Point
-            the browser checker at a running endpoint, or use the CLI and GitHub
-            Action to scan TypeScript, Python and Rust servers.
+            The 2026-07-28 revision made MCP stateless, formalized OAuth 2.1,
+            and dropped several capabilities — a refactor, not a version bump.
+            Point the browser checker at a running endpoint, or use the CLI and
+            GitHub Action to scan TypeScript, Python and Rust servers.
           </p>
         </BlurFade>
 
@@ -245,7 +247,9 @@ export default function Home() {
                 key={lang.name}
                 className="inline-flex items-center gap-1.5 rounded-full border border-white/10 bg-raised px-3 py-1 text-[12.5px] text-muted"
               >
-                <span className="font-semibold text-foreground">{lang.name}</span>
+                <span className="font-semibold text-foreground">
+                  {lang.name}
+                </span>
                 <span aria-hidden className="text-white/25">
                   ·
                 </span>
@@ -257,19 +261,26 @@ export default function Home() {
           </ul>
         </BlurFade>
 
+        {/* The finding, not the sample size. "13,350 endpoints probed"
+            described the method to someone who had not yet been given a reason
+            to care — and was wrong by 30 besides, having been typed by hand
+            against a report that moved. Both halves now come from the snapshot
+            module the report generates. */}
         <BlurFade delay={0.26} className="flex justify-center">
-          <a
+          <Link
             href={ECOSYSTEM_REPORT_URL}
-            target="_blank"
-            rel="noreferrer"
             className="mt-5 inline-flex items-center gap-2 whitespace-nowrap rounded-full border border-accent/25 bg-accent/[0.08] px-3.5 py-1.5 text-[12.5px] text-muted transition-colors hover:border-accent/50 hover:text-foreground"
           >
-            <span className="font-mono text-accent">2026-08-23 snapshot</span>
+            <span className="font-mono text-accent">
+              {share(SNAPSHOT.eras.legacy, SNAPSHOT.graded)} legacy-only
+            </span>
             <span aria-hidden>·</span>
-            <span className="hidden sm:inline">13,350 endpoints probed</span>
-            <span className="sm:hidden">13,350 probed</span>
+            <span className="hidden sm:inline">
+              {count(SNAPSHOT.graded)} servers graded
+            </span>
+            <span className="sm:hidden">{SNAPSHOT.day} snapshot</span>
             <span aria-hidden>→</span>
-          </a>
+          </Link>
         </BlurFade>
 
         {/* ---------- console ---------- */}
@@ -493,11 +504,12 @@ export default function Home() {
               Check once, gate every PR, then{" "}
               <span className="text-warn">fix what fired</span>.
             </h2>
-            <p className="mt-3 max-w-[62ch] text-[14.5px] leading-relaxed text-muted">
-              The browser is the fastest outside-in check. The same deterministic
-              engine ships as a zero-install CLI, a GitHub Action, and an agent
-              skill. Their source checks scan TypeScript, Python and Rust
-              repositories; the skill also works through each remediation.
+            <p className="mt-3 text-[14.5px] leading-relaxed text-muted">
+              The browser is the fastest outside-in check. The same
+              deterministic engine ships as a zero-install CLI, a GitHub Action,
+              and an agent skill. Their source checks scan TypeScript, Python
+              and Rust repositories; the skill also works through each
+              remediation.
             </p>
 
             <div className="mt-6 grid gap-4 sm:grid-cols-2">
@@ -522,7 +534,8 @@ npx mcp-migration-check --source .`}</code>
                 </div>
                 <p className="mt-1 text-[13px] leading-relaxed text-muted">
                   The bundled Action scans TypeScript, Python and Rust projects
-                  and fails only when the selected severity threshold is reached.
+                  and fails only when the selected severity threshold is
+                  reached.
                 </p>
                 <pre className="mt-3 overflow-x-auto rounded-lg border border-white/10 bg-input p-3 font-mono text-[12px] leading-relaxed text-foreground">
                   <code>{`- uses: AlpayC/mcp-migration-check@v1
@@ -564,21 +577,22 @@ npx mcp-migration-check --source .`}</code>
 
               <div className="rounded-xl border border-white/10 bg-raised p-4 sm:col-span-2">
                 <div className="font-display text-[15px] font-semibold">
-                  See the ecosystem snapshot
+                  See where the ecosystem stands
                 </div>
                 <p className="mt-1 text-[13px] leading-relaxed text-muted">
-                  13,350 unique remote registry endpoints probed. The report
-                  separates gradeable responses from endpoints that exposed no
-                  protocol or authentication signal, plus unreachable targets.
+                  {share(SNAPSHOT.eras.legacy, SNAPSHOT.graded)} of{" "}
+                  {count(SNAPSHOT.graded)} graded servers still answer only the
+                  legacy protocol. Among the {count(SNAPSHOT.touchedSinceSpec)}{" "}
+                  touched since the revision shipped —{" "}
+                  {share(SNAPSHOT.legacyAmongTouched, SNAPSHOT.touchedSinceSpec)}
+                  .
                 </p>
-                <a
+                <Link
                   href={ECOSYSTEM_REPORT_URL}
-                  target="_blank"
-                  rel="noreferrer"
                   className="mt-3 inline-flex rounded-lg border border-accent/40 bg-accent/[0.14] px-3.5 py-2 text-[13px] font-medium text-foreground transition-colors hover:border-accent/70"
                 >
-                  Read the 2026-08-23 report →
-                </a>
+                  Read the {SNAPSHOT.day} snapshot →
+                </Link>
               </div>
             </div>
           </section>
@@ -598,6 +612,12 @@ npx mcp-migration-check --source .`}</code>
           </span>
 
           <nav className="flex flex-wrap items-center gap-x-5 gap-y-2">
+            <Link
+              href={ECOSYSTEM_REPORT_URL}
+              className="transition-colors hover:text-foreground"
+            >
+              State of MCP migration
+            </Link>
             <a
               href={REPO_URL}
               target="_blank"

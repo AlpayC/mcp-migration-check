@@ -45,6 +45,20 @@ jobs:
             exit 1
           fi
 
+      # Four places quote the ecosystem figures — the site and both READMEs are
+      # generated from reports/summary.json, and they had drifted before: the
+      # landing page spent weeks claiming 13,350 endpoints against the report's
+      # 13,380. The 16 MB run that produces the summary is gitignored, so this
+      # cannot check the extraction — but it can prove every surface still
+      # matches the summary that is committed.
+      - name: Ecosystem figures are in sync with reports/summary.json
+        run: |
+          npm run build:ecosystem-snapshot
+          if ! git diff --exit-code -- web/lib/ecosystem-snapshot.ts README.md packages/cli/README.md; then
+            echo "::error::A surface quoting the ecosystem figures is stale. Run 'npm run build:ecosystem-snapshot' and commit the result."
+            exit 1
+          fi
+
       # End-to-end over the bundled script: the unit tests never touch the
       # filesystem, so this is the only thing covering scan.ts and the CLI
       # wiring. Asserts the exact rule ids, not just a non-zero exit.

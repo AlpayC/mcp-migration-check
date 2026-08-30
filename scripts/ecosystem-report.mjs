@@ -61,6 +61,8 @@
  *   only where no repository date could be had, and labelled as such.
  */
 import { mkdir, open, readFile, rm, writeFile } from "node:fs/promises";
+
+import { extractSummary, renderSurfaces } from "./ecosystem-snapshot.mjs";
 import { resolve } from "node:path";
 import {
   evaluate,
@@ -1025,6 +1027,14 @@ await writeFile(
   renderMarkdown({ probed, summary, entries, localOnly, startedAt, dateStats }),
 );
 
+// Nothing downstream keeps its own copy of these figures. The JSON above is
+// 16 MB and gitignored, so the aggregates are extracted to a committed summary
+// and every surface that quotes a number — the site, both READMEs — is
+// re-rendered from it here. Regenerating a report and publishing a stale
+// percentage is not a mistake anyone should have to remember not to make.
+const { outfile: summaryPath } = await extractSummary();
+const { written: surfaces } = await renderSurfaces();
+
 console.error("");
 for (const [key, label] of Object.entries(OUTCOME_LABEL)) {
   console.error(`  ${String(summary.outcomes[key]).padStart(5)}  ${label}`);
@@ -1051,6 +1061,8 @@ console.error(
 console.error("");
 console.error(`Wrote ${jsonPath}`);
 console.error(`Wrote ${mdPath}`);
+console.error(`Wrote ${summaryPath}`);
+for (const path of surfaces) console.error(`Wrote ${path}`);
 
 // The report is written, so the checkpoint has done its job. A top-up run
 // never opened one — it had no endpoints to probe.

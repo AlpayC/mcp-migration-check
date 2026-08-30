@@ -30,6 +30,10 @@ skill/mcp-migration-workspace/eval-review.html
 # to be committed when a snapshot is worth keeping; the JSON alongside it names
 # every server probed, which is a deliberately different thing to publish.
 reports/*.json
+# …except the aggregate summary. It names no server, and every surface that
+# quotes a figure is generated from it — including in CI, which has no access
+# to the full run above.
+!reports/summary.json
 # Probe checkpoints: a live run's scratch file, not a publication.
 reports/.ecosystem-*.progress.jsonl
 # The GitHub date cache backing the maintenance split.
