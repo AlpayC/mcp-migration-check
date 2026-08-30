@@ -157,6 +157,27 @@ function replaceBlock(contents, body, file) {
   return contents.replace(pattern, `${start}\n${body}\n${end}`);
 }
 
+/**
+ * A shields.io badge carrying the headline figure.
+ *
+ * The other five badges in the README report status — CI, the release, the
+ * licence. This one reports a finding, which is the thing someone scanning the
+ * page for three seconds should leave with. Generated like everything else: a
+ * badge showing a percentage from two reports ago is worse than no badge, and
+ * it is the element nobody thinks to check.
+ *
+ * shields path encoding: `_` renders as a space, `--` as a literal dash, and
+ * `%` has to be written `%25`.
+ */
+function repoBadge(s) {
+  const figure = pct(s.eras.legacy, s.graded).replace("%", "%25");
+  return (
+    `[![${pct(s.eras.legacy, s.graded)} of public MCP servers still serve only ` +
+    `the legacy protocol](https://img.shields.io/badge/MCP_servers_legacy--only-` +
+    `${figure}-ff5d5d?labelColor=0b0d13)](${SITE_URL}/state-of-mcp)`
+  );
+}
+
 /** The repository README's headline paragraph. */
 function repoHeadline(s) {
   return wrap(
@@ -237,7 +258,13 @@ export async function renderSurfaces() {
   written.push(modulePath);
 
   for (const [relative, render] of [
-    ["README.md", repoHeadline],
+    // The badge sits inside the same block as the headline rather than up in
+    // the status-badge row: an HTML comment between those lines would land in
+    // the middle of a Markdown paragraph, and one generated block is one thing
+    // to keep markers around.
+    ["README.md", (s) => `${repoBadge(s)}
+
+${repoHeadline(s)}`],
     ["packages/cli/README.md", cliLink],
   ]) {
     const path = resolve(repoRoot, relative);
