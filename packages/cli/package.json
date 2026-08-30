@@ -17,10 +17,18 @@
   "keywords": [
     "mcp",
     "model-context-protocol",
+    "mcp-server",
     "migration",
     "linter",
+    "audit",
+    "static-analysis",
     "readiness",
-    "cli"
+    "oauth",
+    "ci",
+    "cli",
+    "typescript",
+    "python",
+    "rust"
   ],
   "repository": {
     "type": "git",

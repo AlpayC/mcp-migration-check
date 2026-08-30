@@ -20,7 +20,20 @@
       "repository": "https://github.com/AlpayC/mcp-migration-check",
       "license": "MIT",
       "category": "development",
-      "keywords": ["mcp", "model-context-protocol", "migration", "readiness", "linter"]
+      "keywords": [
+        "mcp",
+        "model-context-protocol",
+        "mcp-server",
+        "migration",
+        "linter",
+        "audit",
+        "static-analysis",
+        "readiness",
+        "oauth",
+        "typescript",
+        "python",
+        "rust"
+      ]
     }
   ]
 }
