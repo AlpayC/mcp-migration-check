@@ -12,6 +12,7 @@ saw, how to tell a real hazard from noise, and the shape of the fix.
 - [MCP007 — TypeScript SDK still on the v1 line](#mcp007--typescript-sdk-still-on-the-v1-line)
 - [MCP008 — `server/discover` not implemented](#mcp008--serverdiscover-not-implemented)
 - [MCP009 — Python SDK still on the v1 line](#mcp009--python-sdk-still-on-the-v1-line)
+- [MCP010 — Rust MCP SDK on a pre-2026-07-28 line](#mcp010--rust-mcp-sdk-on-a-pre-2026-07-28-line)
 - [MCP101 / MCP102 — compatibility observations](#mcp101--mcp102--compatibility-observations)
 
 Verify exact signatures and header names against the
@@ -392,6 +393,98 @@ official `mcp.server.fastmcp` path. A project using the separate third-party
 `fastmcp` distribution does not match it. A legacy constraint in a nested
 example or test project can still be intentional; use the reported
 `file:line` to decide whether that project ships the server under review.
+
+---
+
+## MCP010 — Rust MCP SDK on a pre-2026-07-28 line
+
+**Severity:** warning — worth **15** points.
+
+**What it means.** The project depends on a Rust MCP crate that speaks an
+older protocol revision. The three supported crates are:
+
+| Crate | Status | Fix |
+|-------|--------|-----|
+| `rmcp` | Current line for 2026-07-28 at major ≥ 3 | Upgrade to 3.x |
+| `rust-mcp-sdk` | v1.x only speaks 2025-11-25; v2.x speaks 2026-07-28 | Upgrade to 2.x or migrate to `rmcp` 3.x |
+| `tower-mcp` | Speaks 2026-07-28 only with the `protocol-2026-07-28` feature | Enable that feature |
+
+**Per-SDK authoritative references:**
+
+| Crate | Repository |
+|-------|------------|
+| `rmcp` (official) | [modelcontextprotocol/rust-sdk](https://github.com/modelcontextprotocol/rust-sdk) — [releases](https://github.com/modelcontextprotocol/rust-sdk/releases) |
+| `tower-mcp` | [joshrotenberg/tower-mcp](https://github.com/joshrotenberg/tower-mcp) |
+| `rust-mcp-sdk` | [rust-mcp-stack/rust-mcp-sdk](https://github.com/rust-mcp-stack/rust-mcp-sdk) |
+
+**How to fix.** Open `Cargo.toml` and update the dependency:
+
+```toml
+# rmcp — upgrade to 3.x
+[dependencies]
+rmcp = "3"
+
+# tower-mcp — enable the protocol feature
+[dependencies]
+tower-mcp = { version = "1", features = ["protocol-2026-07-28"] }
+```
+
+For `rust-mcp-sdk`, upgrade to 2.x (which speaks 2026-07-28) or migrate to
+`rmcp` 3.x. The `rmcp` crate is the official Rust SDK maintained in the
+[modelcontextprotocol/rust-sdk](https://github.com/modelcontextprotocol/rust-sdk)
+repository.
+
+**Telling real from noise.** The rule checks `Cargo.toml` dependency
+declarations, not source imports. A crate declared outside `[dependencies]` does
+not necessarily ship: one under `[dev-dependencies]` never reaches a release
+build, and one under `[workspace.dependencies]` need not be used by any member.
+The finding names the section it read whenever it is not a plain
+`[dependencies]`, so the `detail` line tells you which case you are looking at.
+
+When several crates are affected, the finding names all of them rather than
+stopping at the first — a stale `rmcp` alongside a misconfigured `tower-mcp`
+reports both.
+
+For `tower-mcp`, the rule can only report a missing `protocol-2026-07-28`
+feature when it has actually parsed a feature list that omits it. A bare
+`tower-mcp = "1"` without an explicit `features = [...]` is silently skipped —
+the parser cannot distinguish "no features configured" from "features inherited
+via workspace." This avoids false positives at the cost of occasional false
+negatives.
+
+### Scope and limitations
+
+The `Cargo.toml` parser is dependency-free and line-oriented by design (the
+skill bundle must stay lean). It understands exactly these constructs:
+
+- **Sections:** `[dependencies]`, `[dev-dependencies]`,
+  `[workspace.dependencies]`, with whitespace inside the brackets
+- **Forms:** inline string (`rmcp = "3.1.4"`), inline table
+  (`rmcp = { version = "3", features = [...] }`) on one line or wrapped across
+  several, and the sub-table (`[dependencies.rmcp]` with `version` and
+  `features` as keys)
+- **Crates:** only `rmcp`, `rust-mcp-sdk`, and `tower-mcp` — other
+  dependencies are silently skipped
+
+It does **not** handle:
+
+- **Workspace member manifests** — only the root `Cargo.toml` is read;
+  members inheriting dependencies via `workspace = true` are invisible
+- **Renamed dependencies** — the `package = "rmcp"` form (e.g.
+  `my-rmcp = { package = "rmcp", version = "3" }`) is not recognized
+- **`workspace = true` inheritance** — a dependency declared as
+  `rmcp.workspace = true` without a version in the same manifest is skipped
+- **Target-specific tables** — `[target.'cfg(...)'.dependencies]` and similar
+  are not scanned
+- **Version ranges it cannot read unambiguously** — the major is taken from the
+  start of the constraint, optionally behind a `^` or `~`. A range such as
+  `">=1, <4"` permits a clean 3.x, so the rule stays quiet rather than guessing
+  from it.
+
+A finding therefore proves that the **root `Cargo.toml`** declares one of the
+three crates at a version the rule considers pre-2026-07-28. Absence of a
+finding does not prove the project is clean — it may inherit the dependency
+through a workspace mechanism the parser cannot see.
 
 ---
 

@@ -52,6 +52,11 @@ function render(result: CheckResult): string {
     out.push(`  observed: ${f.detail}`);
     out.push(`  fix:      ${f.fix}`);
     out.push(`  spec:     ${f.specRef}`);
+    if (f.references && f.references.length > 0) {
+      for (const ref of f.references) {
+        out.push(`  see also: ${ref}`);
+      }
+    }
     out.push("");
   }
   // Provenance, not decoration: these citations were read on a date, and a rule

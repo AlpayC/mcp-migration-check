@@ -19,6 +19,8 @@ export interface Finding {
   fix: string;
   /** Pointer into the canonical spec so the user can verify the rule. */
   specRef: string;
+  /** Additional authoritative references (e.g. per-SDK repos). */
+  references?: string[];
   /** "live endpoint" or a `file:line` reference for source findings. */
   location?: string;
 }
@@ -54,6 +56,33 @@ export interface CheckResult {
  * - `unknown` — nothing answered in a way that identified either era.
  */
 export type ServerEra = "modern" | "legacy" | "dual" | "unknown";
+
+/** Package ecosystem that declared an MCP SDK dependency. */
+export type Ecosystem = "npm" | "cargo"; // extensible: "pypi" | "go" | "nuget"
+
+/**
+ * Cargo section a dependency was declared under.
+ *
+ * The distinction is not cosmetic: a crate under `dev-dependencies` never ships,
+ * and one under `workspace.dependencies` need not be used by any member. A
+ * finding has to say which it read, or the reader cannot judge it.
+ */
+export type CargoSection = "dependencies" | "dev-dependencies" | "workspace.dependencies";
+
+/** A single declared MCP SDK dependency, normalized across manifest kinds. */
+export interface SdkDependency {
+  ecosystem: Ecosystem;
+  /** Package/crate name as declared, e.g. "@modelcontextprotocol/sdk" or "rmcp". */
+  name: string;
+  /** Raw version constraint as written: "^1.17.0", "3", "3.1.4". */
+  constraint: string;
+  /** Manifest that declared it, relative to scan root — feeds Finding.location. */
+  manifest: string; // "package.json" | "Cargo.toml"
+  /** Cargo feature flags, when the manifest expresses them. */
+  features?: string[];
+  /** Cargo section it was declared under; absent for npm. */
+  section?: CargoSection;
+}
 
 /** Normalized observations from probing a running MCP server over HTTP. */
 export interface ProbeContext {
@@ -127,6 +156,8 @@ export interface SourceContext {
   sdkVersion: string | null;
   /** Direct `mcp` dependencies found in Python project metadata. */
   pythonSdkRequirements?: PythonSdkRequirement[];
+  /** MCP SDK crates read from `Cargo.toml`; npm goes through `sdkVersion`. */
+  sdkDependencies?: SdkDependency[];
   filesScanned: number;
 }
 
@@ -140,6 +171,8 @@ export interface Rule {
   title: string;
   severity: Severity;
   specRef: string;
+  /** Additional authoritative references (e.g. per-SDK repos for multi-crate rules). */
+  references?: string[];
   /** Returns a Finding when the rule fires, otherwise null. */
   evaluate(ctx: RuleContext): Finding | null;
 }

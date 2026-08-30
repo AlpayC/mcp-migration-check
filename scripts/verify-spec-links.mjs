@@ -43,6 +43,16 @@ const MARKERS = {
     "2026-07-28",
   "https://py.sdk.modelcontextprotocol.io/migration/":
     "Migration Guide: v1 to v2",
+  "https://github.com/modelcontextprotocol/rust-sdk":
+    "official Rust Model Context Protocol SDK",
+  // The release tag prefix, not the word "Releases": that sits in the nav of
+  // every GitHub page and would pass on a 404 shell.
+  "https://github.com/modelcontextprotocol/rust-sdk/releases":
+    "rmcp-v",
+  "https://github.com/joshrotenberg/tower-mcp":
+    "Tower-native Model Context Protocol",
+  "https://github.com/rust-mcp-stack/rust-mcp-sdk":
+    "high-performance, asynchronous Rust toolkit for building MCP",
 };
 
 const TIMEOUT_MS = 20_000;
@@ -76,7 +86,12 @@ async function check(url, marker) {
   }
 }
 
-const refs = [...new Set(rules.map((r) => r.specRef))].sort();
+const refs = [
+  ...new Set([
+    ...rules.map((r) => r.specRef),
+    ...rules.flatMap((r) => r.references ?? []),
+  ]),
+].sort();
 let failed = 0;
 
 // Coverage first: an unmarked ref is a silent gap, not a pass.

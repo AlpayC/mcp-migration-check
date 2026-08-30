@@ -14,6 +14,13 @@
       "prompt": "kannst du mal prüfen ob mein notes-mcp server bereit ist für die 2026-07-28 spec? liegt im ordner notes-mcp/. bitte noch nichts umbauen, ich will erstmal wissen woran ich bin",
       "expected_output": "Separates the two findings correctly. MCP002 is a FALSE POSITIVE — the sessionId at src/index.ts:24 is express-session for the admin UI, not MCP session state, and the MCP transport already uses sessionIdGenerator: undefined. MCP007 is REAL — the server is on the v1 @modelcontextprotocol/sdk line. Should not refactor anything (the user asked for diagnosis only), and should note MCP006 needs a live probe.",
       "files": ["notes-mcp/"]
+    },
+    {
+      "id": 2,
+      "name": "triage-rust-false-positive-readiness",
+      "prompt": "kannst du mal prüfen ob mein rust-notes-mcp server bereit ist für die 2026-07-28 spec? liegt im ordner rust-notes-mcp/. bitte noch nichts umbauen, ich will erstmal wissen woran ich bin",
+      "expected_output": "MCP010 fires — Cargo.toml pins rmcp = \"1.2.0\", a pre-2026-07-28 line; rmcp 3.x is the current line. Should not refactor anything (the user asked for diagnosis only).",
+      "files": ["rust-notes-mcp/"]
     }
   ]
 }

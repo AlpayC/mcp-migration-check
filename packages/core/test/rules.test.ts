@@ -7,6 +7,7 @@ import type {
   ProbeContext,
   PythonSdkRequirement,
   RuleContext,
+  SdkDependency,
   SourceContext,
   SourceMatch,
 } from "../src/types";
@@ -266,6 +267,24 @@ function withSdk(version: string | null): SourceContext {
   return { matches: {}, sdkVersion: version, filesScanned: 1 };
 }
 
+function rustSdkDep(
+  name: string,
+  constraint: string,
+  features?: string[],
+): SdkDependency {
+  return {
+    ecosystem: "cargo",
+    name,
+    constraint,
+    manifest: "Cargo.toml",
+    ...(features ? { features } : {}),
+  };
+}
+
+function withRustDeps(...deps: SdkDependency[]): SourceContext {
+  return { matches: {}, sdkVersion: null, filesScanned: 1, sdkDependencies: deps };
+}
+
 function pythonRequirement(
   sdkLine: PythonSdkRequirement["sdkLine"],
   specifier: string,
@@ -381,6 +400,115 @@ test("MCP009 needs a checkout — a live probe cannot see Python metadata", () =
   assert.ok(!ids({ live: legacyOnly() }).includes("MCP009"));
 });
 
+test("MCP010 fires on rmcp with major < 3", () => {
+  for (const version of ["1.0.0", "2.3.1", "^2"]) {
+    const ctx = withRustDeps(rustSdkDep("rmcp", version));
+    const f = evaluate({ source: ctx }).find((x) => x.ruleId === "MCP010");
+    assert.ok(f, `MCP010 should fire for rmcp ${version}`);
+    assert.ok(f.fix.includes("3.x"), `fix should mention 3.x for ${version}`);
+  }
+});
+
+test("MCP010 stays quiet for rmcp >= 3", () => {
+  for (const version of ["3.0.0", "3.1.4", "^3"]) {
+    const ctx = withRustDeps(rustSdkDep("rmcp", version));
+    assert.ok(
+      !ids({ source: ctx }).includes("MCP010"),
+      `MCP010 should not fire for rmcp ${version}`,
+    );
+  }
+});
+
+test("MCP010 fires on rust-mcp-sdk v1.x", () => {
+  for (const version of ["0.5.0", "1.0.0", "1.5.2"]) {
+    const ctx = withRustDeps(rustSdkDep("rust-mcp-sdk", version));
+    const f = evaluate({ source: ctx }).find((x) => x.ruleId === "MCP010");
+    assert.ok(f, `MCP010 should fire for rust-mcp-sdk ${version}`);
+    assert.ok(f.fix.includes("rmcp 3.x"), `fix should mention rmcp 3.x for ${version}`);
+  }
+});
+
+test("MCP010 stays quiet for rust-mcp-sdk >= 2", () => {
+  for (const version of ["2.0.0", "^2"]) {
+    const ctx = withRustDeps(rustSdkDep("rust-mcp-sdk", version));
+    assert.ok(
+      !ids({ source: ctx }).includes("MCP010"),
+      `MCP010 should not fire for rust-mcp-sdk ${version}`,
+    );
+  }
+});
+
+test("MCP010 fires on tower-mcp without the protocol-2026-07-28 feature", () => {
+  const ctx = withRustDeps(rustSdkDep("tower-mcp", "1.0.0", ["sse"]));
+  const f = evaluate({ source: ctx }).find((x) => x.ruleId === "MCP010");
+  assert.ok(f);
+  assert.ok(f.fix.includes("protocol-2026-07-28"));
+  // tower-mcp finding should cite its own repo, not the umbrella rmcp URL
+  assert.equal(f.specRef, "https://github.com/joshrotenberg/tower-mcp");
+});
+
+test("MCP010 stays quiet for tower-mcp with the protocol-2026-07-28 feature", () => {
+  const ctx = withRustDeps(rustSdkDep("tower-mcp", "1.0.0", ["protocol-2026-07-28"]));
+  assert.ok(!ids({ source: ctx }).includes("MCP010"));
+});
+
+test("MCP010 stays quiet when no cargo dependencies are present", () => {
+  assert.ok(!ids({ source: withSdk("^1.17.0") }).includes("MCP010"));
+});
+
+test("MCP010 stays quiet when tower-mcp features are not parsed", () => {
+  // The rule can only report a missing protocol-2026-07-28 feature when it
+  // has actually parsed a feature list that omits it.  An unparsed dependency
+  // (no explicit features array in the same manifest) is silently skipped.
+  const ctx = withRustDeps(rustSdkDep("tower-mcp", "1.0.0"));
+  assert.ok(!ids({ source: ctx }).includes("MCP010"));
+});
+
+test("MCP010 needs a checkout — a live probe cannot see Cargo.toml", () => {
+  assert.ok(!ids({ live: legacyOnly() }).includes("MCP010"));
+});
+
+test("MCP010 stays quiet on version ranges it cannot read unambiguously", () => {
+  // ">=1, <4" permits 3.x, which is clean. Guessing from the first digit run
+  // anywhere in the string graded those as stale.
+  for (const constraint of [">=1, <4", ">= 1.0", "*"]) {
+    const ctx = withRustDeps(rustSdkDep("rmcp", constraint));
+    assert.ok(
+      !ids({ source: ctx }).includes("MCP010"),
+      `MCP010 should not fire for rmcp "${constraint}"`,
+    );
+  }
+});
+
+test("MCP010 names the section when a crate is not a production dependency", () => {
+  const dev = { ...rustSdkDep("rmcp", "1.0.0"), section: "dev-dependencies" as const };
+  const f = evaluate({ source: withRustDeps(dev) }).find((x) => x.ruleId === "MCP010");
+  assert.ok(f);
+  assert.ok(
+    f.detail.includes("[dev-dependencies]"),
+    "the reader cannot judge the finding without the section",
+  );
+});
+
+test("MCP010 leaves the detail unqualified for a plain [dependencies] crate", () => {
+  const prod = { ...rustSdkDep("rmcp", "1.0.0"), section: "dependencies" as const };
+  const f = evaluate({ source: withRustDeps(prod) }).find((x) => x.ruleId === "MCP010");
+  assert.ok(f);
+  assert.ok(!f.detail.includes("under ["));
+});
+
+test("MCP010 reports every affected crate, not just the first", () => {
+  const ctx = withRustDeps(
+    rustSdkDep("rmcp", "1.0.0"),
+    rustSdkDep("tower-mcp", "1.0.0", ["sse"]),
+  );
+  const f = evaluate({ source: ctx }).find((x) => x.ruleId === "MCP010");
+  assert.ok(f);
+  assert.ok(f.detail.includes("rmcp"), "rmcp should be named");
+  assert.ok(f.detail.includes("tower-mcp"), "tower-mcp must not be hidden behind rmcp");
+  assert.ok(f.fix.includes("protocol-2026-07-28"), "both fixes should be offered");
+});
+
 test("no specRef relies on a page anchor", () => {
   // Regression guard: these used to be `…/2026-07-28#lifecycle` and friends,
   // which silently resolved to the overview page with a fragment that does not
@@ -394,6 +522,18 @@ test("no specRef relies on a page anchor", () => {
       !rule.specRef.includes("#"),
       `${rule.id} specRef relies on an anchor: ${rule.specRef}`,
     );
+    if (rule.references) {
+      for (const ref of rule.references) {
+        assert.ok(
+          ref.startsWith("https://"),
+          `${rule.id} reference must be absolute https, got ${ref}`,
+        );
+        assert.ok(
+          !ref.includes("#"),
+          `${rule.id} reference relies on an anchor: ${ref}`,
+        );
+      }
+    }
   }
 });
 
@@ -426,6 +566,7 @@ test("protocol rules cite a spec subpage, never the bare revision root", () => {
 test("a fired finding always carries a fix and a spec reference", () => {
   const sourceContext = withSdk("^1.17.0");
   sourceContext.pythonSdkRequirements = [pythonRequirement("legacy", "<2")];
+  sourceContext.sdkDependencies = [rustSdkDep("rmcp", "2.0.0")];
   const everything = evaluate({
     live: legacyOnly({
       sessionIdOnModernRequest: true,
@@ -446,6 +587,7 @@ test("a fired finding always carries a fix and a spec reference", () => {
       "MCP006",
       "MCP007",
       "MCP009",
+      "MCP010",
     ],
     "every defect rule should fire on this context",
   );

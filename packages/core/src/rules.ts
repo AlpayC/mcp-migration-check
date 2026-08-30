@@ -1,4 +1,4 @@
-import type { Finding, Rule, RuleContext, SourceMatch } from "./types";
+import type { Finding, Rule, RuleContext, SdkDependency, SourceMatch } from "./types";
 
 /**
  * Rules for the MCP 2026-07-28 specification break.
@@ -40,6 +40,13 @@ const SPEC = {
   // This is the document that states which SDK line speaks which revision.
   sdk: "https://blog.modelcontextprotocol.io/posts/sdk-betas-2026-07-28/",
   pythonSdk: "https://py.sdk.modelcontextprotocol.io/migration/",
+  // The official Rust SDK (rmcp) lives in its own repo, not the blog post
+  // above — that one covers only Python/TS/Go/C#. Verified 2026-08-22.
+  rustSdk: "https://github.com/modelcontextprotocol/rust-sdk",
+  rustSdkReleases: "https://github.com/modelcontextprotocol/rust-sdk/releases",
+  // Per-SDK authoritative references for MCP010 multi-crate coverage.
+  towerMcp: "https://github.com/joshrotenberg/tower-mcp",
+  rustMcpSdk: "https://github.com/rust-mcp-stack/rust-mcp-sdk",
 } as const;
 
 /**
@@ -68,6 +75,11 @@ export const SPEC_VERIFIED_AT: Record<string, string> = {
   [SPEC.sdk]: "2026-08-02",
   // Official v1-to-v2 guide: package constraint, import, and class rename.
   [SPEC.pythonSdk]: "2026-08-27",
+  // Verified by hand against the rust-sdk repo README (2026-08-22).
+  [SPEC.rustSdk]: "2026-08-22",
+  [SPEC.rustSdkReleases]: "2026-08-28",
+  [SPEC.towerMcp]: "2026-08-28",
+  [SPEC.rustMcpSdk]: "2026-08-28",
 };
 
 /** The oldest citation date — what a report should quote, not the newest. */
@@ -325,6 +337,92 @@ export const rules: Rule[] = [
         location: requirement
           ? `${requirement.file}:${requirement.line}`
           : loc(legacyApi),
+      };
+    },
+  },
+  {
+    id: "MCP010",
+    title: "Rust MCP SDK on a pre-2026-07-28 line",
+    severity: "warning",
+    specRef: SPEC.rustSdk,
+    // Per-SDK authoritative references — the owner wants each crate to cite
+    // its own repo rather than one umbrella URL for all three SDKs.
+    references: [SPEC.rustSdkReleases, SPEC.towerMcp, SPEC.rustMcpSdk],
+    evaluate(ctx): Finding | null {
+      const deps = ctx.source?.sdkDependencies ?? [];
+      const RUST_MCP_CRATES = new Set(["rmcp", "rust-mcp-sdk", "tower-mcp"]);
+      const rustMcpDeps = deps.filter(
+        (d) => d.ecosystem === "cargo" && RUST_MCP_CRATES.has(d.name),
+      );
+
+      // A crate outside [dependencies] does not ship, or need not be used by
+      // any workspace member. Naming the section lets the reader judge it
+      // instead of reading every hit as a production problem.
+      const where = (dep: SdkDependency): string =>
+        dep.section && dep.section !== "dependencies" ? ` under [${dep.section}]` : "";
+
+      // Every affected crate is collected: reporting only the first hides the
+      // second until the first is fixed.
+      const hits: { detail: string; fix: string; specRef: string; refs: string[] }[] = [];
+
+      for (const dep of rustMcpDeps) {
+        // rmcp 3.x IS the current line speaking spec 2026-07-28. Fire only on
+        // major < 3 — using < 2 would repeat the MCP007 wrong-threshold bug.
+        if (dep.name === "rmcp") {
+          const majorMatch = dep.constraint.match(/^[~^]?(\d+)/);
+          if (!majorMatch) continue; // Can't parse clearly, stay quiet
+          const major = Number.parseInt(majorMatch[1], 10);
+          if (!Number.isNaN(major) && major < 3) {
+            hits.push({
+              detail: `Cargo.toml depends on ${dep.name} (${dep.constraint})${where(dep)}. That is a pre-2026-07-28 line; rmcp 3.x is the current line speaking spec 2026-07-28.`,
+              fix: "Upgrade rmcp to 3.x (the current line speaking spec 2026-07-28).",
+              specRef: SPEC.rustSdk,
+              refs: [SPEC.rustSdkReleases],
+            });
+          }
+          continue;
+        }
+        // rust-mcp-sdk v1.x only speaks 2025-11-25; any v1.x is pre-2026-07-28.
+        if (dep.name === "rust-mcp-sdk") {
+          const majorMatch = dep.constraint.match(/^[~^]?(\d+)/);
+          if (!majorMatch) continue; // Can't parse clearly, stay quiet
+          const major = Number.parseInt(majorMatch[1], 10);
+          if (!Number.isNaN(major) && major >= 2) continue; // v2.x speaks 2026-07-28
+          hits.push({
+            detail: `Cargo.toml depends on rust-mcp-sdk (${dep.constraint})${where(dep)}. That crate only speaks the 2025-11-25 protocol; migrate to rmcp 3.x or rust-mcp-sdk 2.x.`,
+            fix: "Upgrade to rmcp 3.x or rust-mcp-sdk 2.x (both speak 2026-07-28).",
+            specRef: SPEC.rustMcpSdk,
+            refs: [SPEC.rustSdk, SPEC.rustSdkReleases],
+          });
+          continue;
+        }
+        // tower-mcp opts into the current spec via the protocol-2026-07-28
+        // feature. Fire ONLY when features are parsed AND the flag is absent;
+        // an unparsed dependency is silently skipped (no false positive).
+        if (dep.name === "tower-mcp") {
+          if (dep.features && !dep.features.includes("protocol-2026-07-28")) {
+            hits.push({
+              detail: `Cargo.toml depends on tower-mcp (${dep.constraint})${where(dep)} without the protocol-2026-07-28 feature. That crate speaks 2026-07-28 only when that feature is enabled.`,
+              fix: "For tower-mcp, enable the protocol-2026-07-28 feature.",
+              specRef: SPEC.towerMcp,
+              refs: [SPEC.rustSdk, SPEC.rustSdkReleases],
+            });
+          }
+          continue;
+        }
+      }
+
+      if (hits.length === 0) return null;
+      return {
+        ruleId: "MCP010",
+        title: "Rust MCP SDK on a pre-2026-07-28 line",
+        severity: "warning",
+        detail: hits.map((h) => h.detail).join(" "),
+        fix: hits.map((h) => h.fix).join(" "),
+        // One crate cites its own repo; several cite the SDK index instead.
+        specRef: hits.length === 1 ? hits[0].specRef : SPEC.rustSdk,
+        references: [...new Set(hits.flatMap((h) => h.refs))],
+        location: "Cargo.toml",
       };
     },
   },

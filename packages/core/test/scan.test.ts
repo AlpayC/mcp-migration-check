@@ -3,6 +3,7 @@ import { test } from "node:test";
 
 import {
   classifyPythonSdkSpecifier,
+  parseCargoToml,
   parsePythonSdkRequirements,
 } from "../src/scan";
 
@@ -65,4 +66,257 @@ test("parses requirements, Pipfile, and setup.cfg without matching mcp-types", (
       { requirement: "mcp~=1.28", sdkLine: "legacy" },
     ],
   );
+});
+
+// ── parseCargoToml ──────────────────────────────────────────────────────
+
+const CARGO_DEPS = `[dependencies]
+serde = { version = "1", features = ["derive"] }
+rmcp = "3.1.4"
+reqwest = "0.12"
+`;
+
+const CARGO_TABLE_FORM = `[dependencies]
+rmcp = { version = "3", features = ["server", "sse"] }
+`;
+
+const CARGO_DEV_DEPS = `[dev-dependencies]
+rmcp = "2.0.0"
+`;
+
+const CARGO_WORKSPACE_DEPS = `[workspace.dependencies]
+rmcp = { version = "3.2.0" }
+`;
+
+const CARGO_MULTI_FEATURES = `[dependencies]
+tower-mcp = { version = "1.0.0", features = ["protocol-2026-07-28", "transport"] }
+`;
+
+const CARGO_EMPTY = `[package]
+name = "demo"
+version = "0.1.0"
+`;
+
+const CARGO_UNSUPPORTED = `[dependencies]
+rig-core = "0.1"
+mcp-server = "0.5"
+`;
+
+const CARGO_MIXED = `[dependencies]
+rmcp = "3.1.0"
+rust-mcp-sdk = "0.4.0"
+serde = "1"
+[dev-dependencies]
+tower-mcp = { version = "1.0", features = ["sse"] }
+`;
+
+test("parseCargoToml handles inline string form", () => {
+  const deps = parseCargoToml(CARGO_DEPS);
+  assert.equal(deps.length, 1);
+  assert.equal(deps[0].name, "rmcp");
+  assert.equal(deps[0].constraint, "3.1.4");
+  assert.equal(deps[0].ecosystem, "cargo");
+  assert.equal(deps[0].manifest, "Cargo.toml");
+  assert.equal(deps[0].features, undefined);
+});
+
+test("parseCargoToml handles table form with features", () => {
+  const deps = parseCargoToml(CARGO_TABLE_FORM);
+  assert.equal(deps.length, 1);
+  assert.equal(deps[0].name, "rmcp");
+  assert.equal(deps[0].constraint, "3");
+  assert.deepEqual(deps[0].features, ["server", "sse"]);
+});
+
+test("parseCargoToml handles [dev-dependencies] section", () => {
+  const deps = parseCargoToml(CARGO_DEV_DEPS);
+  assert.equal(deps.length, 1);
+  assert.equal(deps[0].name, "rmcp");
+  assert.equal(deps[0].constraint, "2.0.0");
+});
+
+test("parseCargoToml handles [workspace.dependencies] section", () => {
+  const deps = parseCargoToml(CARGO_WORKSPACE_DEPS);
+  assert.equal(deps.length, 1);
+  assert.equal(deps[0].name, "rmcp");
+  assert.equal(deps[0].constraint, "3.2.0");
+});
+
+test("parseCargoToml identifies all three supported crates", () => {
+  const content = [
+    "[dependencies]",
+    'rmcp = "3.0.0"',
+    'rust-mcp-sdk = "0.5.0"',
+    'tower-mcp = "1.0.0"',
+  ].join("\n");
+  const deps = parseCargoToml(content);
+  const names = deps.map((d) => d.name).sort();
+  assert.deepEqual(names, ["rmcp", "rust-mcp-sdk", "tower-mcp"]);
+});
+
+test("parseCargoToml ignores unsupported crates", () => {
+  const deps = parseCargoToml(CARGO_UNSUPPORTED);
+  assert.equal(deps.length, 0);
+});
+
+test("parseCargoToml handles multiple dependencies in same section", () => {
+  const deps = parseCargoToml(CARGO_MIXED);
+  assert.equal(deps.length, 3);
+  assert.equal(deps[0].name, "rmcp");
+  assert.equal(deps[1].name, "rust-mcp-sdk");
+  assert.equal(deps[2].name, "tower-mcp");
+  assert.deepEqual(deps[2].features, ["sse"]);
+});
+
+test("parseCargoToml returns empty array for manifest with no MCP crates", () => {
+  assert.deepEqual(parseCargoToml(CARGO_EMPTY), []);
+});
+
+test("parseCargoToml skips lines outside dependency sections", () => {
+  const content = [
+    '[package]',
+    'name = "demo"',
+    '',
+    '[dependencies]',
+    'rmcp = "3.0.0"',
+    '',
+    '[profile.release]',
+    'opt-level = 3',
+  ].join("\n");
+  const deps = parseCargoToml(content);
+  assert.equal(deps.length, 1);
+  assert.equal(deps[0].name, "rmcp");
+});
+
+test("parseCargoToml ignores target-specific dependency sections", () => {
+  const content = [
+    '[target.x86_64-unknown-linux-gnu.dependencies]',
+    'rmcp = "2.0.0"',
+    '',
+    '[dependencies]',
+    'rmcp = "3.0.0"',
+  ].join("\n");
+  const deps = parseCargoToml(content);
+  assert.equal(deps.length, 1);
+  assert.equal(deps[0].constraint, "3.0.0");
+});
+
+test("parseCargoToml skips table deps without version string", () => {
+  const content = [
+    '[dependencies]',
+    'rmcp = { git = "https://github.com/example/rmcp.git" }',
+  ].join("\n");
+  assert.deepEqual(parseCargoToml(content), []);
+});
+
+test("parseCargoToml handles features with whitespace variations", () => {
+  const content = [
+    '[dependencies]',
+    'tower-mcp = { version = "1.0", features = [ "sse" , "protocol-2026-07-28" ] }',
+  ].join("\n");
+  const deps = parseCargoToml(content);
+  assert.equal(deps.length, 1);
+  assert.deepEqual(deps[0].features, ["sse", "protocol-2026-07-28"]);
+});
+
+test("parseCargoToml returns empty for empty input", () => {
+  assert.deepEqual(parseCargoToml(""), []);
+});
+
+test("parseCargoToml handles Windows line endings", () => {
+  const content = "[dependencies]\r\nrmcp = \"3.0.0\"\r\n";
+  const deps = parseCargoToml(content);
+  assert.equal(deps.length, 1);
+  assert.equal(deps[0].constraint, "3.0.0");
+});
+
+// The three forms that graded A in silence. The sub-table is the common one in
+// real manifests, which made it the worst of the three to miss.
+
+test("parseCargoToml handles the [dependencies.rmcp] sub-table", () => {
+  const content = [
+    "[dependencies.rmcp]",
+    'version = "1.2.0"',
+    'features = ["server"]',
+  ].join("\n");
+  const deps = parseCargoToml(content);
+  assert.equal(deps.length, 1);
+  assert.equal(deps[0].name, "rmcp");
+  assert.equal(deps[0].constraint, "1.2.0");
+  assert.deepEqual(deps[0].features, ["server"]);
+  assert.equal(deps[0].section, "dependencies");
+});
+
+test("parseCargoToml reads a sub-table under dev-dependencies", () => {
+  const content = ["[dev-dependencies.rmcp]", 'version = "1.0.0"'].join("\n");
+  const deps = parseCargoToml(content);
+  assert.equal(deps.length, 1);
+  assert.equal(deps[0].section, "dev-dependencies");
+});
+
+test("parseCargoToml ignores a sub-table for an unsupported crate", () => {
+  const content = ["[dependencies.serde]", 'version = "1.0"'].join("\n");
+  assert.deepEqual(parseCargoToml(content), []);
+});
+
+test("parseCargoToml closes a sub-table at the next section header", () => {
+  const content = [
+    "[dependencies.rmcp]",
+    'version = "1.2.0"',
+    "",
+    "[package]",
+    'version = "9.9.9"',
+  ].join("\n");
+  const deps = parseCargoToml(content);
+  assert.equal(deps.length, 1);
+  assert.equal(deps[0].constraint, "1.2.0", "the [package] version must not leak in");
+});
+
+test("parseCargoToml handles a multi-line inline table", () => {
+  const content = [
+    "[dependencies]",
+    "rmcp = {",
+    '  version = "1.2.0",',
+    '  features = ["server"]',
+    "}",
+  ].join("\n");
+  const deps = parseCargoToml(content);
+  assert.equal(deps.length, 1);
+  assert.equal(deps[0].constraint, "1.2.0");
+  assert.deepEqual(deps[0].features, ["server"]);
+});
+
+test("parseCargoToml tolerates whitespace inside section brackets", () => {
+  const content = ["[ dependencies ]", 'rmcp = "1.2.0"'].join("\n");
+  const deps = parseCargoToml(content);
+  assert.equal(deps.length, 1);
+  assert.equal(deps[0].constraint, "1.2.0");
+});
+
+test("parseCargoToml records the section each dependency came from", () => {
+  const deps = parseCargoToml(CARGO_MIXED);
+  assert.equal(deps[0].section, "dependencies");
+  assert.equal(deps[1].section, "dependencies");
+  assert.equal(deps[2].section, "dev-dependencies");
+});
+
+test("parseCargoToml ignores a target-specific sub-table", () => {
+  const content = [
+    "[target.'cfg(unix)'.dependencies.rmcp]",
+    'version = "1.0.0"',
+  ].join("\n");
+  assert.deepEqual(parseCargoToml(content), []);
+});
+
+test("parseCargoToml does not let an unterminated table swallow later sections", () => {
+  const content = [
+    "[dependencies]",
+    "rmcp = {",
+    '  version = "1.2.0"',
+    "[package]",
+    'name = "demo"',
+  ].join("\n");
+  const deps = parseCargoToml(content);
+  assert.equal(deps.length, 1);
+  assert.equal(deps[0].constraint, "1.2.0");
 });
