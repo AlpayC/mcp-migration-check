@@ -20,9 +20,18 @@ const S = SNAPSHOT;
  * its own copy of the totals, they drifted from the report within one
  * regeneration and the landing page spent weeks quoting 13,350 of 13,380.
  */
+const TITLE = `State of MCP migration · ${S.day}`;
+const DESCRIPTION = `${share(S.eras.legacy, S.graded)} of graded MCP servers still answer only the legacy protocol. ${count(S.probed)} public registry endpoints probed on ${S.day}.`;
+
+// `openGraph.title` and `openGraph.description` do not inherit from `title` and
+// `description` — Next only inherits the openGraph object wholesale from the
+// layout. Left unset, every share of this page would carry the site's generic
+// blurb instead of the finding, which is the whole reason to share it.
 export const metadata: Metadata = {
-  title: `State of MCP migration · ${S.day}`,
-  description: `${share(S.eras.legacy, S.graded)} of graded MCP servers still answer only the legacy protocol. ${count(S.probed)} public registry endpoints probed on ${S.day}.`,
+  title: TITLE,
+  description: DESCRIPTION,
+  openGraph: { title: TITLE, description: DESCRIPTION, type: "article" },
+  twitter: { card: "summary_large_image", title: TITLE, description: DESCRIPTION },
 };
 
 function Section({
