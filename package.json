@@ -22,7 +22,7 @@
     "report:ecosystem": "node --import tsx scripts/ecosystem-report.mjs"
   },
   "devDependencies": {
-    "@types/node": "^22.20.1",
+    "@types/node": "^26.2.0",
     "esbuild": "^0.28.2",
     "tsx": "^4.23.12",
     "typescript": "^5.6.3"
