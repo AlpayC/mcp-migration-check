@@ -21,7 +21,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: github/codeql-action/init@v3
+      - uses: github/codeql-action/init@v4
         with:
           languages: javascript-typescript
           # security-extended adds the lower-severity rules. The point of
@@ -39,6 +39,6 @@ jobs:
               # something to mis-flag; "fixing" it defeats the fixture.
               - skill/mcp-migration-workspace/fixtures/**
 
-      - uses: github/codeql-action/analyze@v3
+      - uses: github/codeql-action/analyze@v4
         with:
           category: "/language:javascript-typescript"
