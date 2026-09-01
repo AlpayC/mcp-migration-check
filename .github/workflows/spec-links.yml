@@ -44,7 +44,7 @@ jobs:
       # the scheduled run rather than only reddening a run nobody is watching.
       - name: Open an issue if a citation went stale
         if: failure() && github.event_name == 'schedule'
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         with:
           script: |
             const title = "A spec citation no longer verifies";
