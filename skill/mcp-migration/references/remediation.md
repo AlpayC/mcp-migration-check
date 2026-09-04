@@ -563,8 +563,11 @@ official SDK.
 Four kinds of requirement are reported by nothing, because in each the version
 string does not describe what would actually build:
 
-- a module named by a `replace` directive — it may point at a fork or a local
-  path with entirely different protocol support;
+- a module replaced by a local path, or by a *different* module path — a fork,
+  whose version number describes the fork and not the SDK. A same-path
+  `replace` is a version pin, not a fork: it resolves to exactly the module the
+  `require` line names, so it is read from its right-hand side and treated
+  exactly like writing that version on the `require` line;
 - a pseudo-version such as `v1.6.2-0.20260801000000-abcdef123456` — it names a
   commit, not a release;
 - a `+incompatible` tag — it marks a module that never adopted module-aware

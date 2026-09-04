@@ -180,12 +180,26 @@ interface GoScope {
   anyEvidence: boolean;
 }
 
-const goScopes = new WeakMap<object, GoScope>();
+/**
+ * Cached per source context, with a cheap staleness check.
+ *
+ * The cache exists for speed, but a `SourceContext` is an ordinary mutable
+ * object — the test suite builds one and then assigns `sdkDependencies` to it —
+ * so keying on identity alone would serve a scope built before the mutation.
+ * The three input lengths are enough to catch every way this context is
+ * actually assembled, and rebuilding is cheap when they change.
+ */
+const goScopes = new WeakMap<object, GoScope & { stamp: string }>();
 
 function goScopeOf(ctx: RuleContext): GoScope {
   const key = (ctx.source ?? ctx) as object;
+  const stamp = [
+    ctx.source?.matches.modernEra?.length ?? 0,
+    ctx.source?.goManifests?.length ?? 0,
+    ctx.source?.sdkDependencies?.length ?? 0,
+  ].join(":");
   const cached = goScopes.get(key);
-  if (cached) return cached;
+  if (cached && cached.stamp === stamp) return cached;
 
   const manifests = new Set<string>(ctx.source?.goManifests ?? []);
   for (const dep of ctx.source?.sdkDependencies ?? []) {
@@ -222,9 +236,10 @@ function goScopeOf(ctx: RuleContext): GoScope {
     else scope.goEvidenceOwners.add(owner);
   }
 
-  scope.owner = new Map();
-  goScopes.set(key, scope);
-  (scope as GoScope & { resolve: typeof resolve }).resolve = resolve;
+  const stamped = scope as GoScope & { stamp: string; resolve: typeof resolve };
+  stamped.stamp = stamp;
+  stamped.resolve = resolve;
+  goScopes.set(key, stamped);
   return scope;
 }
 

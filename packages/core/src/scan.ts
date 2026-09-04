@@ -264,9 +264,10 @@ export async function scanSource(
   // needs more than a handful — the rules ask only for the first match, whether
   // any exist, or whether one belongs to a given module.
   //
-  // The manifest-derived `modernEra` feeds below this loop do not pass through
-  // `record()` and are deliberately not capped here: they are already bounded
-  // by the number of manifests, itself bounded by `maxFiles`.
+  // Two things deliberately bypass this cap and are bounded another way: the
+  // manifest-derived `modernEra` feeds below this loop (bounded by the number
+  // of manifests, itself bounded by `maxFiles`), and the transport signals in
+  // the loop, which keep one match per directory.
   const MAX_MATCHES_PER_SIGNAL = 500;
   const matches: Record<string, SourceMatch[]> = {};
   /** One transport match per directory — see the record loop below. */
@@ -377,12 +378,10 @@ export async function scanSource(
   // different question, and MCP011 is where it belongs.
   for (const dep of sdkDependencies) {
     if (dep.ecosystem !== "go" || dep.sdkLine !== "modern") continue;
-    // A `replace`d requirement never grants modern credit, even when its
-    // right-hand side is readable enough for MCP011 to judge. The asymmetry is
-    // deliberate: a fork's version number is a claim, not evidence, and
-    // `replace X => X v9.9.9` would otherwise mint a counterweight out of a
-    // version that does not exist and silence MCP001 and MCP002 with it. It can
-    // still make a requirement look *worse* — that direction costs nothing.
+    // `replaced` here means a replacement to a *different* module path — a
+    // fork, whose version number describes the fork and not the SDK. A
+    // same-path version pin is not marked replaced at all and grants credit
+    // exactly as the equivalent `require` line would; see `applyReplacement`.
     if (dep.indirect || dep.replaced) continue;
     matches.modernEra.push({
       file: dep.manifest,
@@ -1030,6 +1029,33 @@ export function parseGoWork(content: string): GoWorkspace {
   return { uses, replacements };
 }
 
+/**
+ * Apply a `replace` whose right-hand side names a module and a version.
+ *
+ * The distinction that matters is whether the module PATH changes. Same path
+ * is a version pin — an ordinary way to hold an upgrade — and it must behave
+ * exactly like writing that version on the `require` line, because it resolves
+ * to exactly the same module. Withholding the counterweight from it cost a
+ * *critical* on a server that had in fact upgraded, and the "a version is a
+ * claim, not evidence" argument does not separate the two cases: a plain
+ * `require X v9.9.9` mints the same unverifiable claim and always has.
+ *
+ * A different path is a fork, and a fork's version number describes the fork,
+ * not the SDK. Those stay unreadable.
+ */
+function applyReplacement(
+  dep: SdkDependency,
+  to: { name: string; version: string },
+): void {
+  if (to.name === dep.name) {
+    dep.constraint = to.version;
+    dep.sdkLine = classifyGoSdkVersion(to.name, to.version);
+    return;
+  }
+  dep.replaced = true;
+  dep.sdkLine = "unknown";
+}
+
 export function parseGoMod(content: string): SdkDependency[] {
   const lines = content.split(/\r?\n/);
   const deps: SdkDependency[] = [];
@@ -1114,11 +1140,7 @@ export function parseGoMod(content: string): SdkDependency[] {
   for (const dep of deps) {
     const to = replacements.get(dep.name);
     if (to) {
-      // The build uses the replacement, so that is what gets classified — and
-      // reported, so the finding names what is actually there.
-      dep.replaced = true;
-      dep.constraint = to.version;
-      dep.sdkLine = classifyGoSdkVersion(to.name, to.version);
+      applyReplacement(dep, to);
       continue;
     }
     if (!replaced.has(dep.name)) continue;
@@ -1184,18 +1206,16 @@ async function readGoModDependencies(
       // A workspace replacement wins over whatever the module file says — and
       // is read the same way, so the identical directive means the same thing
       // wherever it is written.
-      let overridden = {};
+      const scoped = { ...dep, manifest: relative };
       if (workspace?.has(dep.name)) {
         const to = workspace.get(dep.name);
-        overridden = to
-          ? {
-              replaced: true,
-              constraint: to.version,
-              sdkLine: classifyGoSdkVersion(to.name, to.version),
-            }
-          : { replaced: true, sdkLine: "unknown" as const };
+        if (to) applyReplacement(scoped, to);
+        else {
+          scoped.replaced = true;
+          scoped.sdkLine = "unknown";
+        }
       }
-      deps.push({ ...dep, manifest: relative, ...overridden });
+      deps.push(scoped);
     }
   }
   return { deps, manifests };

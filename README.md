@@ -284,8 +284,10 @@ the absence of the modern surface is a defect.
   `require` in both the single-line and block forms across every `go.mod` under
   the scan root. It deliberately reports nothing for four kinds of requirement,
   because in each the version string does not describe what would actually
-  build: one named by a `replace` directive (which can point at a fork or a
-  local path), a pseudo-version such as `v1.6.2-0.20260801000000-abcdef123456`
+  build: one replaced by a local path or by a *different* module path — a fork,
+  whose version describes the fork and not the SDK, while a same-path `replace`
+  is a version pin and is read from its right-hand side — a pseudo-version such
+  as `v1.6.2-0.20260801000000-abcdef123456`
   (which names a commit, not a release), a `+incompatible` tag, and one marked
   `// indirect` (which the toolchain maintains to mean nothing here imports it).
   `go.work` is read for `replace` directives only — a workspace replacement
@@ -405,7 +407,7 @@ scripts/ecosystem-report.mjs registry-wide readiness snapshot
 ```
 
 ```bash
-npm test              # node --test via tsx; 217 assertions, no network
+npm test              # node --test via tsx; the full suite, no network
 npm run typecheck
 npm run build:bundles # regenerate both copies of the engine; CI fails if stale
 ```

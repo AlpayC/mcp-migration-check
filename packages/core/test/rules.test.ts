@@ -910,3 +910,23 @@ test("a fired finding always carries a fix and a spec reference", () => {
     assert.ok(f.detail.length > 0, `${f.ruleId} has no detail`);
   }
 });
+
+test("the Go ownership index is rebuilt when its source context changes", () => {
+  // The cache is keyed on the source object, which is mutable — this suite
+  // builds one and then assigns to it. A scope served from before a mutation
+  // would answer about dependencies that were not there yet.
+  const ctx: SourceContext = {
+    matches: { sessionId: [{ file: "svc/main.go", line: 9, text: "GetSessionID:" }] },
+    sdkVersion: null,
+    filesScanned: 1,
+  };
+  assert.ok(ids({ source: ctx }).includes("MCP002"), "no evidence yet");
+
+  ctx.goManifests = ["svc/go.mod"];
+  ctx.sdkDependencies = [goSdkDep(GO_SDK, "v1.7.0", { manifest: "svc/go.mod" })];
+  ctx.matches.modernEra = [{ file: "svc/go.mod", line: 3, text: `${GO_SDK} v1.7.0` }];
+  assert.ok(
+    !ids({ source: ctx }).includes("MCP002"),
+    "the same object, now carrying evidence, must be re-read",
+  );
+});

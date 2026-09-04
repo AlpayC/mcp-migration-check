@@ -905,25 +905,37 @@ test("the transport signals keep one match per directory, not the first 500", as
   });
 });
 
-test("a replace that names a module and a version is readable, not opaque", () => {
-  // `replace X => X v1.6.1` changes nothing about the build, yet treating every
-  // replace as unreadable let one line clear both MCP011 and MCP002.
-  const selfRef = parseGoMod(
-    [`require ${GO_SDK} v1.6.1`, `replace ${GO_SDK} => ${GO_SDK} v1.6.1`].join("\n"),
+test("a same-path replace is a version pin; a different path is a fork", () => {
+  // What separates the two is whether the module PATH changes. Same path
+  // resolves to exactly the module the require line names, so it must behave
+  // exactly like writing that version on the require line — including earning
+  // the counterweight. Withholding that cost a critical on a server that had
+  // in fact upgraded.
+  const pinDown = parseGoMod(
+    [`require ${GO_SDK} v1.7.0`, `replace ${GO_SDK} => ${GO_SDK} v1.6.1`].join("\n"),
   );
-  assert.equal(selfRef[0].sdkLine, "legacy");
-  assert.equal(selfRef[0].replaced, true);
+  assert.equal(pinDown[0].sdkLine, "legacy", "the replacement is what builds");
+  assert.equal(pinDown[0].constraint, "v1.6.1");
+  assert.equal(pinDown[0].replaced, undefined, "a version pin is not a fork");
 
-  const upgrade = parseGoMod(
+  const pinUp = parseGoMod(
     [`require ${GO_SDK} v1.6.1`, `replace ${GO_SDK} => ${GO_SDK} v1.7.0`].join("\n"),
   );
-  assert.equal(upgrade[0].sdkLine, "modern", "the replacement is what builds");
-  assert.equal(upgrade[0].constraint, "v1.7.0");
+  assert.equal(pinUp[0].sdkLine, "modern");
+  assert.equal(pinUp[0].replaced, undefined);
+
+  // A different module path is a fork, and a fork's version describes the fork.
+  const fork = parseGoMod(
+    [`require ${GO_SDK} v1.6.1`, `replace ${GO_SDK} => github.com/acme/go-sdk v1.7.0`].join("\n"),
+  );
+  assert.equal(fork[0].sdkLine, "unknown", "a fork's version is not the SDK's");
+  assert.equal(fork[0].replaced, true);
 
   const localPath = parseGoMod(
     [`require ${GO_SDK} v1.6.1`, `replace ${GO_SDK} => ./forks/go-sdk`].join("\n"),
   );
   assert.equal(localPath[0].sdkLine, "unknown", "a local fork stays honestly unreadable");
+  assert.equal(localPath[0].replaced, true);
 });
 
 test("parseGoWork reads use and replace in both directive forms", () => {
@@ -1024,18 +1036,31 @@ test("a block comment is not configuration, and a backtick in one is not a strin
   });
 });
 
-test("a replace can never mint modern-era evidence", async () => {
-  // `replace X => X v9.9.9` names a version that does not exist. It may silence
-  // MCP011 — every replace does, and that is documented — but it must not
-  // manufacture a counterweight and take MCP001 and MCP002 down with it.
+test("a fork replacement never mints modern-era evidence", async () => {
+  // A different module path is a fork, and its version number describes the
+  // fork. It may silence MCP011 — every unreadable replace does, and that is
+  // documented — but it must not manufacture a counterweight and take MCP001
+  // and MCP002 down with it.
   await withTempDir(async (dir) => {
     await fs.writeFile(
       path.join(dir, "go.mod"),
-      `module m\ngo 1.25.0\nrequire ${GO_SDK} v1.6.1\nreplace ${GO_SDK} => ${GO_SDK} v9.9.9\n`,
+      `module m\ngo 1.25.0\nrequire ${GO_SDK} v1.6.1\nreplace ${GO_SDK} => github.com/acme/go-sdk v9.9.9\n`,
     );
     await fs.writeFile(path.join(dir, "main.go"), "package main\n");
     const r = await scanSource(dir);
     assert.equal(r.sdkDependencies?.[0].replaced, true);
-    assert.deepEqual(r.matches.modernEra, [], "a forged version grants no credit");
+    assert.deepEqual(r.matches.modernEra, [], "a fork's version grants no credit");
+  });
+
+  // A same-path pin is not a fork, and does earn it — the identical module at
+  // the identical version as the equivalent require line.
+  await withTempDir(async (dir) => {
+    await fs.writeFile(
+      path.join(dir, "go.mod"),
+      `module m\ngo 1.25.0\nrequire ${GO_SDK} v1.6.1\nreplace ${GO_SDK} => ${GO_SDK} v1.7.0\n`,
+    );
+    await fs.writeFile(path.join(dir, "main.go"), "package main\n");
+    const r = await scanSource(dir);
+    assert.equal(r.matches.modernEra.length, 1, "a version pin is evidence");
   });
 });

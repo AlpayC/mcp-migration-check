@@ -82,8 +82,13 @@ function isGoPath(file) {
 var goScopes = /* @__PURE__ */ new WeakMap();
 function goScopeOf(ctx) {
   const key = ctx.source ?? ctx;
+  const stamp = [
+    ctx.source?.matches.modernEra?.length ?? 0,
+    ctx.source?.goManifests?.length ?? 0,
+    ctx.source?.sdkDependencies?.length ?? 0
+  ].join(":");
   const cached = goScopes.get(key);
-  if (cached) return cached;
+  if (cached && cached.stamp === stamp) return cached;
   const manifests = new Set(ctx.source?.goManifests ?? []);
   for (const dep of ctx.source?.sdkDependencies ?? []) {
     if (dep.ecosystem === "go") manifests.add(dep.manifest);
@@ -113,9 +118,10 @@ function goScopeOf(ctx) {
     if (owner === null) scope.hasNonGoEvidence = true;
     else scope.goEvidenceOwners.add(owner);
   }
-  scope.owner = /* @__PURE__ */ new Map();
-  goScopes.set(key, scope);
-  scope.resolve = resolve;
+  const stamped = scope;
+  stamped.stamp = stamp;
+  stamped.resolve = resolve;
+  goScopes.set(key, stamped);
   return scope;
 }
 function owningGoManifest(ctx, file) {
@@ -1375,6 +1381,15 @@ function parseGoWork(content) {
   }
   return { uses, replacements };
 }
+function applyReplacement(dep, to) {
+  if (to.name === dep.name) {
+    dep.constraint = to.version;
+    dep.sdkLine = classifyGoSdkVersion(to.name, to.version);
+    return;
+  }
+  dep.replaced = true;
+  dep.sdkLine = "unknown";
+}
 function parseGoMod(content) {
   const lines = content.split(/\r?\n/);
   const deps = [];
@@ -1438,9 +1453,7 @@ function parseGoMod(content) {
   for (const dep of deps) {
     const to = replacements.get(dep.name);
     if (to) {
-      dep.replaced = true;
-      dep.constraint = to.version;
-      dep.sdkLine = classifyGoSdkVersion(to.name, to.version);
+      applyReplacement(dep, to);
       continue;
     }
     if (!replaced.has(dep.name)) continue;
@@ -1476,16 +1489,16 @@ async function readGoModDependencies(dir, maxBytes, maxFiles) {
     manifests.push(relative);
     const workspace = governed.get(relative);
     for (const dep of parseGoMod(content)) {
-      let overridden = {};
+      const scoped = { ...dep, manifest: relative };
       if (workspace?.has(dep.name)) {
         const to = workspace.get(dep.name);
-        overridden = to ? {
-          replaced: true,
-          constraint: to.version,
-          sdkLine: classifyGoSdkVersion(to.name, to.version)
-        } : { replaced: true, sdkLine: "unknown" };
+        if (to) applyReplacement(scoped, to);
+        else {
+          scoped.replaced = true;
+          scoped.sdkLine = "unknown";
+        }
       }
-      deps.push({ ...dep, manifest: relative, ...overridden });
+      deps.push(scoped);
     }
   }
   return { deps, manifests };
