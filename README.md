@@ -298,13 +298,12 @@ the absence of the modern surface is a defect.
   replaced module can still be.
 - **Go comments and strings are scanned, not parsed.** The transport signals
   skip `//` comments and string literals, including multi-line backtick
-  strings — a server's own `--stateless` help text should not be read as
-  configuration. The tracking is lexical, so a file that opens a backtick
-  string and never closes it hides the rest of itself from those two signals.
-  Such a file does not compile, so it cannot be a working server, but it can
-  suppress MCP011's second case in a scan. `/* … */` comments are tracked too,
-  so neither a doc comment describing the flag nor a backtick quoted inside one
-  is read as code.
+  strings and `/* … */` comments — a server's own `--stateless` help text
+  should not be read as configuration, and a backtick quoted inside a comment
+  is not a string. The tracking is lexical, so a file that opens a backtick
+  string or a block comment and never closes it hides the rest of itself from
+  those two signals. Such a file does not compile, so it cannot be a working
+  server, but it can suppress MCP011's second case in a scan.
 - **MCP011's second case argues from absence.** A modern `go-sdk` serving
   streamable HTTP is only flagged when the stateless opt-in appears *nowhere*
   in the module that declares the requirement. Test files (`*_test.go`) and
