@@ -3,6 +3,7 @@ import { test } from "node:test";
 
 import { evaluate, gradeFrom } from "../src/engine";
 import { rules, rulesVerifiedAt, SPEC_VERIFIED_AT } from "../src/rules";
+import { classifyGoSdkVersion } from "../src/scan";
 import type {
   ProbeContext,
   PythonSdkRequirement,
@@ -70,6 +71,8 @@ function source(signal: string, match: Partial<SourceMatch> = {}): SourceContext
     roots: [],
     pythonV1Sdk: [],
     pythonServerSdk: [],
+    goStreamableHttp: [],
+    goStatelessOptIn: [],
     modernEra: [],
   };
   return {
@@ -285,6 +288,50 @@ function withRustDeps(...deps: SdkDependency[]): SourceContext {
   return { matches: {}, sdkVersion: null, filesScanned: 1, sdkDependencies: deps };
 }
 
+const GO_SDK = "github.com/modelcontextprotocol/go-sdk";
+const MCP_GO = "github.com/mark3labs/mcp-go";
+
+function goSdkDep(
+  name: string,
+  constraint: string,
+  extra: Partial<SdkDependency> = {},
+): SdkDependency {
+  return {
+    ecosystem: "go",
+    name,
+    constraint,
+    manifest: "go.mod",
+    line: 5,
+    sdkLine: classifyGoSdkVersion(name, constraint),
+    ...extra,
+  };
+}
+
+/**
+ * A Go source context: module requirements plus whichever Go signals matched.
+ *
+ * The signals matter as much as the manifest here — MCP011's second hit is an
+ * argument from the absence of one of them, so a test that omits them is not
+ * testing the rule that ships.
+ */
+function withGoDeps(
+  deps: SdkDependency[],
+  signals: { streamableHttp?: boolean; statelessOptIn?: boolean } = {},
+): SourceContext {
+  const matches: Record<string, SourceMatch[]> = {};
+  if (signals.streamableHttp) {
+    matches.goStreamableHttp = [
+      { file: "main.go", line: 31, text: "handler := mcp.NewStreamableHTTPHandler(get, nil)" },
+    ];
+  }
+  if (signals.statelessOptIn) {
+    matches.goStatelessOptIn = [
+      { file: "main.go", line: 30, text: "opts := &mcp.StreamableHTTPOptions{Stateless: true}" },
+    ];
+  }
+  return { matches, sdkVersion: null, filesScanned: 1, sdkDependencies: deps };
+}
+
 function pythonRequirement(
   sdkLine: PythonSdkRequirement["sdkLine"],
   specifier: string,
@@ -297,6 +344,309 @@ function pythonRequirement(
     sdkLine,
   };
 }
+
+// ── MCP011 (Go) ─────────────────────────────────────────────────────────
+//
+// The threshold is the point of these. Go crossed the protocol break inside
+// its v1 line, so a major-version test — the shape MCP007/MCP009/MCP010 use —
+// would never fire. v1.6.1 must fire and v1.7.0 must not, and no assertion
+// here may be satisfiable by a major-only comparison.
+
+test("MCP011 fires on the official Go SDK below v1.7.0", () => {
+  for (const version of ["v1.0.0", "v1.4.1", "v1.6.0-pre.1", "v1.6.1"]) {
+    const ctx = withGoDeps([goSdkDep(GO_SDK, version)]);
+    const f = evaluate({ source: ctx }).find((x) => x.ruleId === "MCP011");
+    assert.ok(f, `MCP011 should fire for go-sdk ${version}`);
+    assert.ok(f.fix.includes("v1.7.0"), `fix should name v1.7.0 for ${version}`);
+  }
+});
+
+test("MCP011 stays quiet for the official Go SDK at v1.7.0 and later", () => {
+  // v1.7.0-pre.1 is the trap: strict semver sorts it below v1.7.0, but it is
+  // the release that shipped 2026-07-28 support and must not be flagged.
+  for (const version of ["v1.7.0-pre.1", "v1.7.0", "v1.8.0", "v2.0.0"]) {
+    const ctx = withGoDeps([goSdkDep(GO_SDK, version)]);
+    assert.ok(
+      !ids({ source: ctx }).includes("MCP011"),
+      `MCP011 should not fire for go-sdk ${version}`,
+    );
+  }
+});
+
+test("MCP011 fires on mark3labs/mcp-go below v1.0.0", () => {
+  for (const version of ["v0.32.0", "v0.58.0"]) {
+    const ctx = withGoDeps([goSdkDep(MCP_GO, version)]);
+    const f = evaluate({ source: ctx }).find((x) => x.ruleId === "MCP011");
+    assert.ok(f, `MCP011 should fire for mcp-go ${version}`);
+    assert.ok(f.fix.includes("v1.0.0"), `fix should name v1.0.0 for ${version}`);
+  }
+});
+
+test("MCP011 stays quiet for mark3labs/mcp-go at v1.0.0 and later", () => {
+  for (const version of ["v1.0.0-beta.1", "v1.0.0", "v1.2.0"]) {
+    const ctx = withGoDeps([goSdkDep(MCP_GO, version)]);
+    assert.ok(
+      !ids({ source: ctx }).includes("MCP011"),
+      `MCP011 should not fire for mcp-go ${version}`,
+    );
+  }
+});
+
+test("MCP011 never advises a v2 module path — Go has none", () => {
+  const ctx = withGoDeps([goSdkDep(GO_SDK, "v1.6.1")]);
+  const f = evaluate({ source: ctx }).find((x) => x.ruleId === "MCP011");
+  assert.ok(f);
+  assert.ok(!f.fix.includes("go-sdk/v2"), "there is no /v2 module path to migrate to");
+  assert.ok(f.fix.includes("module path does not change"));
+});
+
+test("MCP011 reports every affected module, not just the first", () => {
+  const ctx = withGoDeps([goSdkDep(GO_SDK, "v1.6.1"), goSdkDep(MCP_GO, "v0.58.0")]);
+  const f = evaluate({ source: ctx }).find((x) => x.ruleId === "MCP011");
+  assert.ok(f);
+  assert.ok(f.detail.includes(GO_SDK));
+  assert.ok(f.detail.includes(MCP_GO));
+});
+
+test("MCP011 ignores indirect and replaced requirements", () => {
+  // `// indirect` is not this project's SDK choice, and a `replace` means the
+  // required version is not what builds. Both must be silent in both
+  // directions: no finding, and no claim of modernity either.
+  for (const extra of [{ indirect: true }, { replaced: true, sdkLine: "unknown" as const }]) {
+    const ctx = withGoDeps([goSdkDep(GO_SDK, "v1.6.1", extra)]);
+    assert.ok(
+      !ids({ source: ctx }).includes("MCP011"),
+      `MCP011 should stay quiet for ${JSON.stringify(extra)}`,
+    );
+  }
+});
+
+test("MCP011 stays quiet on a version it cannot classify", () => {
+  for (const version of ["v0.0.0-20260801000000-abcdef123456", "v2.1.0+incompatible", "latest"]) {
+    const ctx = withGoDeps([goSdkDep(GO_SDK, version)]);
+    assert.ok(
+      !ids({ source: ctx }).includes("MCP011"),
+      `MCP011 should stay quiet for ${version}`,
+    );
+  }
+});
+
+test("MCP011 fires when a modern go-sdk serves HTTP without the stateless opt-in", () => {
+  const ctx = withGoDeps([goSdkDep(GO_SDK, "v1.7.0")], { streamableHttp: true });
+  const f = evaluate({ source: ctx }).find((x) => x.ruleId === "MCP011");
+  assert.ok(f, "an upgraded but stateful HTTP server still cannot serve the revision");
+  assert.ok(f.fix.includes("Stateless: true"));
+  assert.ok(f.detail.includes("main.go:31"), "should point at the transport it read");
+});
+
+test("MCP011 stays quiet when the stateless opt-in is present", () => {
+  const ctx = withGoDeps([goSdkDep(GO_SDK, "v1.7.0")], {
+    streamableHttp: true,
+    statelessOptIn: true,
+  });
+  assert.ok(!ids({ source: ctx }).includes("MCP011"));
+});
+
+test("MCP011 does not ask a stdio server for a flag it does not need", () => {
+  // stdio does not implement the version-restricting transport interface, so
+  // it serves the revision on the module version alone. The SDK's own headline
+  // example is a stdio server; flagging it would be a false positive on the
+  // most common shape there is.
+  const ctx = withGoDeps([goSdkDep(GO_SDK, "v1.7.0")]);
+  assert.ok(!ids({ source: ctx }).includes("MCP011"));
+});
+
+test("MCP011 does not apply the stateless requirement to mark3labs", () => {
+  // mcp-go advertises every version it implements by default, so a stateful
+  // HTTP server on v1.0.0 is not a defect. Only the official SDK gates.
+  const ctx = withGoDeps([goSdkDep(MCP_GO, "v1.0.0")], { streamableHttp: true });
+  assert.ok(!ids({ source: ctx }).includes("MCP011"));
+});
+
+test("MCP011 blames the module that declares the requirement, not a sibling", () => {
+  // A repository-wide absence check produced the sentence "services/notes/go.mod
+  // requires v1.7.0 … but the transport at legacy/demo/main.go is configured
+  // without Stateless" — a specific, checkable claim about a file belonging to
+  // a different module. Ownership is the nearest enclosing go.mod.
+  const modern = goSdkDep(GO_SDK, "v1.7.0", { manifest: "services/notes/go.mod" });
+  const legacy = goSdkDep(GO_SDK, "v1.6.1", { manifest: "legacy/demo/go.mod" });
+  const ctx: SourceContext = {
+    matches: {
+      goStreamableHttp: [
+        { file: "legacy/demo/main.go", line: 9, text: "mcp.NewStreamableHTTPHandler(g, nil)" },
+      ],
+    },
+    sdkVersion: null,
+    filesScanned: 2,
+    sdkDependencies: [modern, legacy],
+  };
+  const f = evaluate({ source: ctx }).find((x) => x.ruleId === "MCP011");
+  assert.ok(f);
+  assert.ok(f.location?.startsWith("legacy/demo/go.mod"), "the finding belongs to the legacy module");
+  assert.ok(
+    !f.detail.includes("services/notes/go.mod"),
+    "the modern module must not be blamed for a sibling's transport",
+  );
+});
+
+test("MCP011 clamps an overlong version token before quoting it", () => {
+  const ctx = withGoDeps([goSdkDep(GO_SDK, `v1.6.1-${"a".repeat(400)}`)]);
+  const f = evaluate({ source: ctx }).find((x) => x.ruleId === "MCP011");
+  assert.ok(f);
+  assert.ok(f.detail.length < 300, `detail should be clamped, got ${f.detail.length}`);
+});
+
+test("a migrated module does not acquit an un-migrated one beside it", () => {
+  // Modern evidence read from a go.mod speaks for that module and no other.
+  // Repository-wide, a single migrated sibling silenced both criticals on this
+  // repo's own go-notes-mcp fixture — 60 points — and nothing pinned it.
+  const ctx: SourceContext = {
+    matches: {
+      initialize: [{ file: "legacy/main.go", line: 12, text: "InitializedHandler:" }],
+      sessionId: [{ file: "legacy/main.go", line: 9, text: "GetSessionID:" }],
+      modernEra: [
+        { file: "tools/go.mod", line: 3, text: `${GO_SDK} v1.7.0` },
+      ],
+    },
+    sdkVersion: null,
+    filesScanned: 2,
+    goManifests: ["legacy/go.mod", "tools/go.mod"],
+    sdkDependencies: [
+      goSdkDep(GO_SDK, "v1.6.1", { manifest: "legacy/go.mod" }),
+      goSdkDep(GO_SDK, "v1.7.0", { manifest: "tools/go.mod" }),
+    ],
+  };
+  const fired = ids({ source: ctx });
+  assert.ok(fired.includes("MCP001"), "the legacy module is still legacy-only");
+  assert.ok(fired.includes("MCP002"), "and its session handling is still unguarded");
+});
+
+test("modern evidence still covers the module it belongs to", () => {
+  const ctx: SourceContext = {
+    matches: {
+      sessionId: [{ file: "svc/main.go", line: 9, text: "GetSessionID:" }],
+      modernEra: [{ file: "svc/go.mod", line: 3, text: `${GO_SDK} v1.7.0` }],
+    },
+    sdkVersion: null,
+    filesScanned: 1,
+    goManifests: ["svc/go.mod"],
+    sdkDependencies: [goSdkDep(GO_SDK, "v1.7.0", { manifest: "svc/go.mod" })],
+  };
+  assert.ok(!ids({ source: ctx }).includes("MCP002"));
+});
+
+test("an unclassifiable Go requirement is not spent as a critical", () => {
+  // A `replace` to a fork and a `go get …@main` pseudo-version are routine, and
+  // both leave the requirement unreadable. MCP011 already stays quiet; MCP002's
+  // source arm was firing on the absence instead — on a `sessionId` tool
+  // argument, which is what MCP002's own fix recommends.
+  for (const version of ["v1.7.1-0.20260901120000-abcdef123456", "v1.7.0"]) {
+    const replaced = version === "v1.7.0";
+    const ctx: SourceContext = {
+      matches: { sessionId: [{ file: "main.go", line: 4, text: 'SessionID string `json:"sessionId"`' }] },
+      sdkVersion: null,
+      filesScanned: 1,
+      goManifests: ["go.mod"],
+      sdkDependencies: [
+        goSdkDep(GO_SDK, version, {
+          manifest: "go.mod",
+          ...(replaced ? { replaced: true, sdkLine: "unknown" as const } : {}),
+        }),
+      ],
+    };
+    assert.ok(
+      !ids({ source: ctx }).includes("MCP002"),
+      `MCP002 should stay quiet for ${replaced ? "a replaced module" : version}`,
+    );
+  }
+});
+
+test("Go evidence says nothing about a Python or TypeScript server", () => {
+  // `dirOf("go.mod")` is "" and every path starts with "", so a Go module at
+  // the repository root "owned" server.py and index.ts — and a polyglot repo
+  // with a Go tooling module acquitted its Python MCP server.
+  const ctx: SourceContext = {
+    matches: {
+      initialize: [{ file: "src/index.ts", line: 3, text: "server.oninitialized = …" }],
+      modernEra: [{ file: "go.mod", line: 3, text: `${GO_SDK} v1.7.0` }],
+    },
+    sdkVersion: null,
+    filesScanned: 2,
+    goManifests: ["go.mod"],
+    sdkDependencies: [goSdkDep(GO_SDK, "v1.7.0", { manifest: "go.mod" })],
+  };
+  assert.ok(ids({ source: ctx }).includes("MCP001"), "a Go version cannot acquit a TS server");
+});
+
+test("the verdict does not depend on which match sorts first", () => {
+  // Scoping to whichever match sorted first made two byte-identical trees
+  // disagree purely on directory names: the modern module's own dual-era
+  // token was selected, found acquitted, and the whole repository read clean.
+  const build = (modern: string, legacy: string): SourceContext => ({
+    matches: {
+      initialize: [
+        { file: `${modern}/main.go`, line: 9, text: "InitializedHandler:" },
+        { file: `${legacy}/main.go`, line: 9, text: "InitializedHandler:" },
+      ].sort((a, b) => a.file.localeCompare(b.file)),
+      modernEra: [{ file: `${modern}/go.mod`, line: 3, text: `${GO_SDK} v1.7.0` }],
+    },
+    sdkVersion: null,
+    filesScanned: 2,
+    goManifests: [`${modern}/go.mod`, `${legacy}/go.mod`],
+    sdkDependencies: [
+      goSdkDep(GO_SDK, "v1.7.0", { manifest: `${modern}/go.mod` }),
+      goSdkDep(GO_SDK, "v1.6.1", { manifest: `${legacy}/go.mod` }),
+    ],
+  });
+  for (const [modern, legacy] of [["a-modern", "z-legacy"], ["z-modern", "a-legacy"]]) {
+    assert.ok(
+      ids({ source: build(modern, legacy) }).includes("MCP001"),
+      `${modern} + ${legacy}: the legacy module is still legacy-only`,
+    );
+  }
+});
+
+test("Go evidence in no module cannot acquit a module", () => {
+  // Orphan evidence was folded in with npm/Python evidence and so went
+  // repository-wide, letting one stray `.go` file above every `go.mod` clear
+  // both criticals off every module below it — silently undoing an earlier
+  // round's scoping fix.
+  const ctx: SourceContext = {
+    matches: {
+      initialize: [{ file: "legacy/main.go", line: 9, text: "InitializedHandler:" }],
+      sessionId: [{ file: "legacy/main.go", line: 8, text: "GetSessionID:" }],
+      modernEra: [{ file: "tools.go", line: 5, text: "mcp.DiscoverResult{}" }],
+    },
+    sdkVersion: null,
+    filesScanned: 2,
+    goManifests: ["legacy/go.mod"],
+    sdkDependencies: [goSdkDep(GO_SDK, "v1.6.1", { manifest: "legacy/go.mod" })],
+  };
+  const fired = ids({ source: ctx });
+  assert.ok(fired.includes("MCP001"), "an orphan file speaks for no module");
+  assert.ok(fired.includes("MCP002"));
+});
+
+test("a file in no module is still answered for by evidence that exists", () => {
+  // The other half, and a separate decision: a `.go` file above every `go.mod`
+  // belongs to no module, so no module's staleness can be inferred about it
+  // either. It falls back rather than being denied evidence that is there.
+  const ctx: SourceContext = {
+    matches: {
+      sessionId: [{ file: "orphan.go", line: 4, text: 'SessionID string `json:"sessionId"`' }],
+      modernEra: [{ file: "svc/go.mod", line: 3, text: `${GO_SDK} v1.7.0` }],
+    },
+    sdkVersion: null,
+    filesScanned: 2,
+    goManifests: ["svc/go.mod"],
+    sdkDependencies: [goSdkDep(GO_SDK, "v1.7.0", { manifest: "svc/go.mod" })],
+  };
+  assert.ok(!ids({ source: ctx }).includes("MCP002"));
+});
+
+test("MCP011 needs a checkout — a live probe cannot see go.mod", () => {
+  assert.ok(!ids({ live: legacyOnly() }).includes("MCP011"));
+});
 
 test("an info finding costs no points, so compatibility cannot lower a grade", () => {
   const clean = gradeFrom(evaluate({ live: dualEra() }));
@@ -566,7 +916,7 @@ test("protocol rules cite a spec subpage, never the bare revision root", () => {
 test("a fired finding always carries a fix and a spec reference", () => {
   const sourceContext = withSdk("^1.17.0");
   sourceContext.pythonSdkRequirements = [pythonRequirement("legacy", "<2")];
-  sourceContext.sdkDependencies = [rustSdkDep("rmcp", "2.0.0")];
+  sourceContext.sdkDependencies = [rustSdkDep("rmcp", "2.0.0"), goSdkDep(GO_SDK, "v1.6.1")];
   const everything = evaluate({
     live: legacyOnly({
       sessionIdOnModernRequest: true,
@@ -588,6 +938,7 @@ test("a fired finding always carries a fix and a spec reference", () => {
       "MCP007",
       "MCP009",
       "MCP010",
+      "MCP011",
     ],
     "every defect rule should fire on this context",
   );
@@ -596,4 +947,24 @@ test("a fired finding always carries a fix and a spec reference", () => {
     assert.ok(f.specRef.length > 0, `${f.ruleId} has no specRef`);
     assert.ok(f.detail.length > 0, `${f.ruleId} has no detail`);
   }
+});
+
+test("the Go ownership index is rebuilt when its source context changes", () => {
+  // The cache is keyed on the source object, which is mutable — this suite
+  // builds one and then assigns to it. A scope served from before a mutation
+  // would answer about dependencies that were not there yet.
+  const ctx: SourceContext = {
+    matches: { sessionId: [{ file: "svc/main.go", line: 9, text: "GetSessionID:" }] },
+    sdkVersion: null,
+    filesScanned: 1,
+  };
+  assert.ok(ids({ source: ctx }).includes("MCP002"), "no evidence yet");
+
+  ctx.goManifests = ["svc/go.mod"];
+  ctx.sdkDependencies = [goSdkDep(GO_SDK, "v1.7.0", { manifest: "svc/go.mod" })];
+  ctx.matches.modernEra = [{ file: "svc/go.mod", line: 3, text: `${GO_SDK} v1.7.0` }];
+  assert.ok(
+    !ids({ source: ctx }).includes("MCP002"),
+    "the same object, now carrying evidence, must be re-read",
+  );
 });

@@ -1,7 +1,8 @@
-import { promises as fs } from "node:fs";
+import { constants, promises as fs } from "node:fs";
 import path from "node:path";
 import type {
   CargoSection,
+  GoSdkLine,
   PythonSdkLine,
   PythonSdkRequirement,
   SdkDependency,
@@ -41,9 +42,22 @@ const IGNORED_DIRS = new Set([
   // Rust build and vendoring directories.
   "target",
   ".cargo",
+  // Go vendoring lives here too, and a vendored tree contains the SDK's own
+  // source — scanning it reports the SDK's compatibility code as the project's.
   "vendor",
+  // Go module and build caches, when someone points GOPATH/GOMODCACHE inside
+  // the repository. Same reasoning as `.venv`.
+  ".gocache",
+  ".gomodcache",
 ]);
 
+/**
+ * Language-neutral signals. These run over every scannable file, so every
+ * alternative here has to be a token that means the same thing in TypeScript,
+ * Python, Rust and Go alike. Anything language-specific belongs in
+ * `GO_SIGNAL_PATTERNS` below — an identifier added here that is only idiomatic
+ * in one language becomes a false positive in the other three.
+ */
 const SIGNAL_PATTERNS: Record<string, RegExp> = {
   initialize: /InitializeRequest|oninitialized|on_initialized|notifications\/initialized|["']initialize["']|["']initialized["']/,
   sessionId:
@@ -68,14 +82,168 @@ const SIGNAL_PATTERNS: Record<string, RegExp> = {
    * well-maintained ones — without something to weigh against `initialize`,
    * every dual-era codebase grades as if it had never migrated.
    *
-   * Deliberately narrow: the `io.modelcontextprotocol/` prefix and
-   * `server/discover` only exist in `2026-07-28`, so a match is hard evidence.
-   * A dependency on the v2 SDK packages counts too — that line has no legacy
-   * mode to be confused with.
+   * Deliberately narrow, and it must stay that way. The four `_meta` keys are
+   * ENUMERATED rather than matched by prefix, and the difference is load
+   * bearing: the *legacy* mark3labs SDK (mcp-go v0.58.0, `mcp/tasks.go`)
+   * already defines `io.modelcontextprotocol/related-task`. Loosening this to
+   * the bare prefix would read a legacy Go server as modern and silence MCP001
+   * on it. A dependency on the v2 npm packages counts too — that line has no
+   * legacy mode to be confused with.
+   *
+   * Note what is deliberately NOT here: the literal date `"2026-07-28"`. It was
+   * added for Go and removed again, because quoting is not what separates
+   * evidence from mention. A comment reading `we do not support "2026-07-28"
+   * yet`, or a test asserting a server negotiates *down* from it, both matched
+   * — and silenced MCP001 and MCP002 on genuinely legacy servers in every
+   * language. Go's evidence comes from `go.mod` instead; see `scanSource`.
    */
   modernEra:
     /io\.modelcontextprotocol\/(protocolVersion|clientCapabilities|clientInfo|serverInfo)|["']server\/discover["']|@modelcontextprotocol\/(server|client|core)\b|\bfrom\s+mcp\.server\s+import\s+[^#\n]*\bMCPServer\b|\bfrom\s+mcp\.server\.mcpserver(?:\.[A-Za-z_][\w.]*)?\s+import\b/,
 };
+
+/**
+ * Signals that only run over `.go` files.
+ *
+ * Every alternative is qualified — by a package selector, or by a method call
+ * on a receiver — and that is not stylistic.
+ *
+ * The selector is `\w+\.` rather than a literal `mcp.` because Go lets an
+ * import be aliased (`import mcpsdk "…/go-sdk/mcp"`), and pinning the package
+ * name made an aliased server invisible. These type names are distinctive
+ * enough to carry a match on their own; it was the *bare* form that was
+ * dangerous. An earlier version matched
+ * bare identifiers such as `AddRoots`, `EnableSampling`, `NewLoggingHandler`
+ * and `SessionIdManager`, and because `SIGNAL_PATTERNS` runs over every
+ * language, a two-line TypeScript file declaring `CreateMessageRequest` and
+ * `SessionIdManager` went from a clean A to a D with a *critical*. Ordinary Go
+ * projects with an unrelated `AddRoots` or an OpenTelemetry `EnableSampling`
+ * did the same. The SDK types are always written qualified in user code, so
+ * requiring the qualifier costs nothing and stops all of it.
+ */
+const GO_SIGNAL_PATTERNS: Record<string, RegExp> = {
+  initialize:
+    /\b\w+\.Initialized?(?:Params|Request|Result)\b|\.InitializeParams\s*\(\)|\.(?:Add|On)(?:Before|After)Initialize\b|\bInitializedHandler\s*:/,
+  sessionId: /\bGetSessionID\s*[:=]|\bserver\.WithSessionIdManager(?:Resolver)?\s*\(/,
+  // `server.WithLogging()` takes NO arguments in mcp-go, and the empty parens
+  // are what separates it from every other Go middleware library's
+  // `server.WithLogging(logger)` — `server` being the most common variable name
+  // in Go for an HTTP server, that distinction is the whole guard.
+  logging:
+    /\b\w+\.LoggingMessageParams\b|\b\w+\.NewLoggingHandler\s*\(|\bserver\.WithLogging\s*\(\s*\)|\.SendLogMessageToClient\s*\(/,
+  sampling:
+    /\b\w+\.CreateMessage(?:Params|Result|Request)\b|\bCreateMessageHandler\s*:|\.(?:EnableSampling|RequestSampling)\s*\(|\bclient\.WithSamplingHandler\s*\(/,
+  // The bare `.AddRoots(` / `.RemoveRoots(` family is deliberately gone: it
+  // accepted any receiver at all, and convicted a Go LSP server whose
+  // workspace type has exactly those methods. `WithRoots()` is zero-argument in
+  // mcp-go, same reasoning as WithLogging above.
+  roots:
+    /\b\w+\.ListRoots(?:Params|Result)\b|\bserver\.WithRoots\s*\(\s*\)|\bclient\.WithRootsHandler\s*\(/,
+  modernEra:
+    /\b\w+\.MetaKey(?:ProtocolVersion|ClientInfo|ServerInfo|ClientCapabilities|SubscriptionID)\b|\b\w+\.ProtocolVersion20260728\b|\b\w+\.Discover(?:Params|Result)\b|["']subscriptions\/listen["']/,
+};
+
+/**
+ * Transport-configuration signals, read as a PAIR and only from non-test Go
+ * files.
+ *
+ * MCP011's second hit argues from the absence of the opt-in, and an argument
+ * from absence is only as good as what it is allowed to look at. A
+ * `compat_test.go` that spins up a stateful handler to regression-test legacy
+ * clients would otherwise convict the production server beside it, and a
+ * `Stateless: true` in some other module's test file would acquit one that is
+ * genuinely misconfigured. Comments are stripped before matching for the same
+ * reason: `// TODO: set Stateless: true once the session store is gone` is a
+ * confession, not a configuration.
+ */
+const GO_TRANSPORT_PATTERNS: Record<string, RegExp> = {
+  // Package-qualified: an earlier form matched any identifier ending in
+  // `StreamableHTTPServer`, so an unrelated module declaring `type
+  // StreamableHTTPServer struct{}` was enough to convict the module beside it.
+  goStreamableHttp:
+    /\b\w+\.(?:NewStreamableHTTPHandler|NewStreamableHTTPServer|StreamableHTTPOptions|StreamableHTTPHandler|StreamableServerTransport)\b/,
+  // `WithStateLess` takes a bool, so the argument has to be read: passing
+  // `false` is an explicit declaration of statefulness, not an opt-in.
+  goStatelessOptIn:
+    /\bStateless\s*:\s*true\b|\.Stateless\s*=\s*true\b|\bWithStateLess\s*\(\s*true\s*\)|\bStatelessSessionIdManager\b/,
+};
+
+/**
+ * Drop a `//` line comment, respecting string literals.
+ *
+ * `indexOf("//")` is not good enough, and the failure is not the one you would
+ * expect. The risk was never matching *inside* a URL — it was truncating the
+ * line at one and deleting the code that followed. A single line reading
+ * `&mcp.StreamableHTTPOptions{Endpoint: "https://…", Stateless: true}` lost its
+ * opt-in and was reported as stateful; moving a URL onto a transport line hid a
+ * genuine defect the other way. Go has three string forms and all three can
+ * carry a `//`.
+ */
+/** Lexer state that survives a line boundary in Go. */
+export interface GoLexState {
+  inRawString: boolean;
+  inBlockComment: boolean;
+}
+
+/**
+ * Return the code on this line, with comments and string contents removed.
+ *
+ * Two kinds of state cross a line boundary in Go — a backtick string and a
+ * `/* *\/` comment — and both mattered. Without raw-string state, a server's
+ * own `--stateless … Stateless: true` usage text acquitted the stateful server
+ * printing it. Without block-comment state it was worse in two ways: a doc
+ * comment saying "production runs with Stateless: true; this build does not"
+ * acquitted the build that does not, and an odd backtick anywhere in a block
+ * comment — quoting an identifier, say — opened a raw string that ran to end of
+ * file and blinded every line after it.
+ *
+ * Only the two transport signals use this. They are read as a pair, and an
+ * argument from absence is only as good as what it is allowed to look at.
+ */
+export function stripGoLineComment(
+  line: string,
+  state: GoLexState,
+): { code: string; state: GoLexState } {
+  let { inRawString, inBlockComment } = state;
+  let quote: '"' | "'" | "`" | null = inRawString ? "`" : null;
+  let code = "";
+
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+
+    if (inBlockComment) {
+      // Quotes are not tracked inside a comment — that is the whole point.
+      if (ch === "*" && line[i + 1] === "/") {
+        inBlockComment = false;
+        i++;
+      }
+      continue;
+    }
+
+    if (quote) {
+      if (ch === "\\" && quote !== "`") i++;
+      else if (ch === quote) quote = null;
+      continue;
+    }
+
+    if (ch === "/" && line[i + 1] === "/") break;
+    if (ch === "/" && line[i + 1] === "*") {
+      inBlockComment = true;
+      i++;
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === "`") {
+      quote = ch;
+      // Keep the opening delimiter: `Stateless: true` is matched on the code
+      // before the string, and dropping it would splice two tokens together.
+      code += ch;
+      continue;
+    }
+    code += ch;
+  }
+
+  // Only a backtick can legally stay open across a line.
+  return { code, state: { inRawString: quote === "`", inBlockComment } };
+}
 
 export interface ScanOptions {
   maxFiles?: number;
@@ -89,8 +257,24 @@ export async function scanSource(
   const maxFiles = opts.maxFiles ?? 5000;
   const maxBytes = opts.maxBytesPerFile ?? 1_000_000;
 
+  // Bound the matches collected by the per-line scan. `maxFiles` and
+  // `maxBytesPerFile` bound the input, not the output: a repository of large,
+  // densely matching files can accumulate millions of `SourceMatch` objects and
+  // exhaust the heap long before the file cap is reached. Nothing downstream
+  // needs more than a handful — the rules ask only for the first match, whether
+  // any exist, or whether one belongs to a given module.
+  //
+  // Two things deliberately bypass this cap and are bounded another way: the
+  // manifest-derived `modernEra` feeds below this loop (bounded by the number
+  // of manifests, itself bounded by `maxFiles`), and the transport signals in
+  // the loop, which keep one match per directory.
+  const MAX_MATCHES_PER_SIGNAL = 500;
   const matches: Record<string, SourceMatch[]> = {};
+  /** One transport match per directory — see the record loop below. */
+  const transportDirs: Record<string, Set<string>> = {};
   for (const key of Object.keys(SIGNAL_PATTERNS)) matches[key] = [];
+  for (const key of Object.keys(GO_SIGNAL_PATTERNS)) matches[key] ??= [];
+  for (const key of Object.keys(GO_TRANSPORT_PATTERNS)) matches[key] ??= [];
 
   let filesScanned = 0;
   const files = await collectFiles(dir, maxFiles);
@@ -102,22 +286,55 @@ export async function scanSource(
     const content = await readIfSmallEnough(file, maxBytes);
     if (content === null) continue;
     filesScanned++;
+    const relative = path.relative(dir, file).split(path.sep).join("/");
+    const isGo = path.extname(file) === ".go";
+    // A Go test file may legitimately exercise the legacy path, so it must not
+    // decide how the production transport beside it is configured.
+    const isGoTest = isGo && file.endsWith("_test.go");
+
+    const applicable: Record<string, RegExp>[] = [SIGNAL_PATTERNS];
+    if (isGo) applicable.push(GO_SIGNAL_PATTERNS);
+    let lex: GoLexState = { inRawString: false, inBlockComment: false };
+
     const lines = content.split(/\r?\n/);
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
-      for (const [signal, re] of Object.entries(SIGNAL_PATTERNS)) {
-        if (re.test(line)) {
-          matches[signal].push({
-            file: path.relative(dir, file),
-            line: i + 1,
-            text: line.trim().slice(0, 200),
-          });
+      const record = (signal: string) => {
+        if (matches[signal].length >= MAX_MATCHES_PER_SIGNAL) return;
+        matches[signal].push({
+          file: relative,
+          line: i + 1,
+          text: line.trim().slice(0, 200),
+        });
+      };
+
+      for (const patterns of applicable) {
+        for (const [signal, re] of Object.entries(patterns)) {
+          if (re.test(line)) record(signal);
         }
+      }
+
+      if (!isGo || isGoTest) continue;
+      const stripped = stripGoLineComment(line, lex);
+      lex = stripped.state;
+      for (const [signal, re] of Object.entries(GO_TRANSPORT_PATTERNS)) {
+        if (!re.test(stripped.code)) continue;
+        // These two are only ever asked "does any match belong to module M",
+        // so one per directory is all the information there is. A flat count
+        // cap made the answer depend on directory names: with 600 correctly
+        // configured modules ahead of it, a genuinely stateful module named
+        // `zzz-broken` was never recorded and went unreported, while the same
+        // tree with the module renamed `aaa-broken` was caught.
+        const dir = relative.includes("/") ? relative.slice(0, relative.lastIndexOf("/") + 1) : "";
+        const seen = transportDirs[signal] ??= new Set<string>();
+        if (seen.has(dir)) continue;
+        seen.add(dir);
+        matches[signal].push({ file: relative, line: i + 1, text: line.trim().slice(0, 200) });
       }
     }
   }
 
-  const pkg = await readPackageJson(dir);
+  const pkg = await readPackageJson(dir, maxBytes);
   // A dependency on the v2 packages is modern-era evidence even when no source
   // line matched — a freshly generated server may not spell any of the `_meta`
   // keys out literally.
@@ -137,7 +354,50 @@ export async function scanSource(
     });
   }
 
-  return { matches, sdkVersion: pkg.sdkVersion, pythonSdkRequirements, filesScanned, sdkDependencies: await readCargoDependencies(dir) };
+  const go = await readGoModDependencies(dir, maxBytes, maxFiles);
+  const sdkDependencies = [...(await readCargoDependencies(dir, maxBytes)), ...go.deps];
+
+  // Go needs this feed more than any other ecosystem, because a modern Go
+  // server usually spells nothing modern in its own source: the SDK answers
+  // `server/discover` internally, and `examples/server/hello/main.go` is
+  // byte-identical between go-sdk v1.6.1 and v1.7.0. Without the manifest as
+  // evidence, every Go repository would be scored as though it had never
+  // migrated — which is the exact failure `modernEra` exists to prevent.
+  //
+  // It is deliberately NOT gated on how the HTTP transport is configured, and
+  // that separation was learned the hard way. Withholding the counterweight
+  // from a stateful v1.7.0 server did not merely suppress a warning: it turned
+  // MCP002 back on and charged a *critical* for a `sessionId` tool argument —
+  // the very pattern MCP002's own fix recommends. Worse, it did so for
+  // mark3labs servers too, which MCP011 explicitly exempts, so the rule and
+  // the gate disagreed about the one asymmetry the design was built around.
+  //
+  // The two questions are genuinely separate. "Does this project depend on an
+  // SDK that speaks the revision?" is what `modernEra` answers, and `go.mod`
+  // answers it. "Is the transport configured to actually serve it?" is a
+  // different question, and MCP011 is where it belongs.
+  for (const dep of sdkDependencies) {
+    if (dep.ecosystem !== "go" || dep.sdkLine !== "modern") continue;
+    // `replaced` here means a replacement to a *different* module path — a
+    // fork, whose version number describes the fork and not the SDK. A
+    // same-path version pin is not marked replaced at all and grants credit
+    // exactly as the equivalent `require` line would; see `applyReplacement`.
+    if (dep.indirect || dep.replaced) continue;
+    matches.modernEra.push({
+      file: dep.manifest,
+      line: dep.line ?? 0,
+      text: `${dep.name} ${dep.constraint}`,
+    });
+  }
+
+  return {
+    matches,
+    sdkVersion: pkg.sdkVersion,
+    pythonSdkRequirements,
+    filesScanned,
+    sdkDependencies,
+    goManifests: go.manifests,
+  };
 }
 
 /**
@@ -374,7 +634,7 @@ async function readPythonSdkRequirements(
   maxBytes: number,
   maxFiles: number,
 ): Promise<PythonSdkRequirement[]> {
-  const manifests = await collectPythonDependencyFiles(dir, maxFiles);
+  const manifests = await collectMatchingFiles(dir, isPythonDependencyFile, maxFiles);
   const found: PythonSdkRequirement[] = [];
   for (const manifest of manifests) {
     const content = await readIfSmallEnough(manifest, maxBytes);
@@ -412,9 +672,11 @@ const MODERN_PACKAGES = [
  */
 async function readPackageJson(
   dir: string,
+  maxBytes: number,
 ): Promise<{ sdkVersion: string | null; modernPackages: string[] }> {
   try {
-    const raw = await fs.readFile(path.join(dir, "package.json"), "utf8");
+    const raw = await readIfSmallEnough(path.join(dir, "package.json"), maxBytes);
+    if (raw === null) return { sdkVersion: null, modernPackages: [] };
     const pkg = JSON.parse(raw);
     const deps = { ...pkg.devDependencies, ...pkg.dependencies };
     const dep = deps["@modelcontextprotocol/sdk"];
@@ -568,20 +830,461 @@ export function parseCargoToml(content: string): SdkDependency[] {
   return deps;
 }
 
-async function readCargoDependencies(dir: string): Promise<SdkDependency[]> {
-  try {
-    const raw = await fs.readFile(path.join(dir, "Cargo.toml"), "utf8");
-    return parseCargoToml(raw);
-  } catch {
-    return [];
-  }
+async function readCargoDependencies(
+  dir: string,
+  maxBytes: number,
+): Promise<SdkDependency[]> {
+  const raw = await readIfSmallEnough(path.join(dir, "Cargo.toml"), maxBytes);
+  return raw === null ? [] : parseCargoToml(raw);
 }
 
 /**
- * Read a file, or return null if it is too large or unreadable.
+ * Go MCP modules this project recognises, mapped to the first release that
+ * speaks `2026-07-28`.
+ *
+ * READ THIS BEFORE CHANGING THE NUMBERS. Go did not cross the protocol break
+ * the way the other SDKs did. There is no `github.com/modelcontextprotocol/
+ * go-sdk/v2` — the proxy 404s it — and there never was a package rename. The
+ * official SDK crossed inside its v1 line, at the v1.6.1 -> v1.7.0 *minor*.
+ * A major-version threshold, which is the shape MCP007, MCP009 and MCP010 all
+ * use, would therefore never fire here. That is exactly the mistake MCP007
+ * made in the other direction when it recommended a `@modelcontextprotocol/sdk`
+ * 2.x that has never existed, so the threshold is a full release triple.
+ *
+ * Verified 2026-09-03 against the module proxy and the module source:
+ * go-sdk v1.6.1 `mcp/shared.go` still says `protocolVersion20251125`; v1.7.0
+ * says `latestProtocolVersion = protocolVersion20260728`. mark3labs mcp-go
+ * v0.58.0 says `LATEST_PROTOCOL_VERSION = "2025-11-25"`; v1.0.0 says
+ * `ProtocolVersion20260728`.
+ *
+ * Modules deliberately absent: `metoro-io/mcp-golang`, `ThinkInAIXYZ/go-mcp`,
+ * `riza-io/mcp-go`, `strowk/foxy-contexts`. None has a release speaking this
+ * revision, so "upgrade" would be advice with no target — the same reasoning
+ * that keeps `rig-core` out of `MCP_CRATES`.
+ */
+const MCP_GO_MODULES: Record<string, [number, number, number]> = {
+  "github.com/modelcontextprotocol/go-sdk": [1, 7, 0],
+  "github.com/mark3labs/mcp-go": [1, 0, 0],
+};
+
+/**
+ * A Go pseudo-version — a synthesised version naming a commit.
+ *
+ * Three shapes exist and the separator before the timestamp differs between
+ * them, which is easy to get wrong: `v0.0.0-20260801000000-abcdef123456` with
+ * no prior tag, `v1.6.2-0.20260801000000-abcdef123456` after a release tag,
+ * and `v1.7.0-pre.1.0.20260801000000-abcdef123456` after a pre-release. Hence
+ * `[-.]` rather than `-`; matching only the first shape would let the other
+ * two be read as ordinary releases.
+ */
+const GO_PSEUDO_VERSION = /[-.]\d{14}-[0-9a-f]{12}$/;
+
+/**
+ * Which protocol era a Go module requirement resolves to.
+ *
+ * The comparison is on the RELEASE TRIPLE, and the pre-release suffix is
+ * deliberately discarded. Strict semver puts `v1.7.0-pre.1` below `v1.7.0`,
+ * but that pre-release already carries `protocolVersion20260728` — it is the
+ * release the announcement told people to test. Comparing triples calls it
+ * modern and still calls `v1.6.0-pre.1` legacy, which is what the source says
+ * of both.
+ *
+ * Everything that names something other than a release returns `unknown`, and
+ * `unknown` produces no finding and no modern-era evidence. A pseudo-version
+ * identifies a commit, not a protocol era; `+incompatible` and anything
+ * unparseable say even less. Guessing here would cost a false positive, and
+ * this project has already paid for one of those.
+ */
+export function classifyGoSdkVersion(module: string, version: string): GoSdkLine {
+  // `Object.hasOwn`, not `in`. `"toString" in {}` is true and
+  // `MCP_GO_MODULES["toString"]` is a function, whose `[0]` is undefined, and
+  // every `<` against undefined is false — so a `go.mod` line reading
+  // `toString v1.0.0` fabricated a "modern" dependency, fed the counterweight
+  // and bought a grade. This runs as a GitHub Action over pull-request
+  // content, so `go.mod` is untrusted input.
+  if (!Object.hasOwn(MCP_GO_MODULES, module)) return "unknown";
+  const threshold = MCP_GO_MODULES[module];
+
+  const raw = version.trim();
+  if (!raw || raw.endsWith("+incompatible") || GO_PSEUDO_VERSION.test(raw)) return "unknown";
+
+  const parsed = raw.match(/^v(\d+)\.(\d+)\.(\d+)(?:-[0-9A-Za-z.-]+)?$/);
+  if (!parsed) return "unknown";
+
+  const triple = [Number(parsed[1]), Number(parsed[2]), Number(parsed[3])];
+  for (let i = 0; i < 3; i++) {
+    if (triple[i] !== threshold[i]) return triple[i] < threshold[i] ? "legacy" : "modern";
+  }
+  return "modern";
+}
+
+/**
+ * Strip a `//` comment, reporting whether it marked the requirement indirect.
+ *
+ * Go's own rule (`x/mod/modfile`) is that the comment's FIRST field must be
+ * `indirect` or `indirect;` — not that the word appears somewhere in it.
+ * Searching the whole comment was wrong in both directions, and both were
+ * reachable from an ordinary human comment: `// pinned 2026-08; no longer
+ * indirect` marked a direct modern requirement indirect and cost the project
+ * its counterweight, while `// direct dep; nothing here is indirect` made a
+ * genuinely legacy requirement invisible and graded it A.
+ */
+function stripGoComment(line: string): { text: string; indirect: boolean } {
+  const at = line.indexOf("//");
+  if (at === -1) return { text: line.trim(), indirect: false };
+  const first = line.slice(at + 2).trim().split(/\s+/)[0];
+  return {
+    text: line.slice(0, at).trim(),
+    indirect: first === "indirect" || first === "indirect;",
+  };
+}
+
+/**
+ * Parse MCP-relevant module requirements from `go.mod` content.
+ *
+ * Pure, line-oriented, dependency-free — no TOML/Go-mod parser may be added,
+ * because the skill bundle has to stay lean. Same contract as
+ * `parseCargoToml`: only the recognised modules are emitted.
+ *
+ * Handled:
+ * - `require github.com/x/y v1.2.3` on one line
+ * - `require ( … )` blocks, with comments and blank lines inside
+ * - `// indirect`, recorded rather than dropped
+ * - `replace`, in both the block and single-line forms, which marks the module
+ *   `replaced` — see below
+ *
+ * Ignored, because none of them declares what this module builds against:
+ * `exclude`, `retract`, `module`, `go`, `toolchain`.
+ *
+ * A `replace` is the one that would otherwise produce a confident lie. It can
+ * redirect the build to a fork or a local directory whose protocol support the
+ * required version says nothing about, so a replaced module is reported by
+ * nothing at all rather than reported wrongly.
+ */
+/** What a `go.work` says: which modules it governs, and what it replaces. */
+export interface GoWorkspace {
+  /** `use` paths, relative to the `go.work`'s own directory. */
+  uses: string[];
+  /** Replaced module -> its readable replacement, or null when unreadable. */
+  replacements: Map<string, { name: string; version: string } | null>;
+}
+
+/**
+ * Parse the `use` and `replace` directives of a `go.work`.
+ *
+ * A workspace `replace` overrides the module-level one for the build, so
+ * ignoring it produced exactly the confident lie `parseGoMod`'s own handling
+ * exists to prevent. But it governs only the modules it `use`s — and applying
+ * every `go.work` in a repository to every `go.mod` in it reopened the
+ * laundering vector in a different file: one five-line `go.work` beside an
+ * unrelated playground module cleared MCP002 and MCP011 off a legacy server
+ * two directories away.
+ */
+export function parseGoWork(content: string): GoWorkspace {
+  const uses: string[] = [];
+  const replacements = new Map<string, { name: string; version: string } | null>();
+  const unquote = (token: string) => token.replace(/^"(.*)"$/, "$1");
+
+  let block: "use" | "replace" | null = null;
+  const noteUse = (text: string) => {
+    const trimmed = text.trim();
+    // A quoted path may contain spaces, so the quotes have to be read before
+    // the whitespace split rather than stripped from the first token after it.
+    const quoted = trimmed.match(/^"([^"]*)"/);
+    const value = quoted ? quoted[1] : (trimmed.split(/\s+/)[0] ?? "");
+    if (value) uses.push(value);
+  };
+  const noteReplace = (text: string) => {
+    const module = unquote(text.split(/\s+/)[0] ?? "");
+    if (!module) return;
+    const arrow = text.indexOf("=>");
+    if (arrow !== -1) {
+      const rhs = text.slice(arrow + 2).trim().split(/\s+/).map(unquote);
+      // Same reading as in `go.mod`: a right-hand side naming a module and a
+      // version is readable, and the identical line must not mean two
+      // different things depending on which file it sits in.
+      if (rhs.length === 2 && /^v\d/.test(rhs[1])) {
+        replacements.set(module, { name: rhs[0], version: rhs[1] });
+        return;
+      }
+    }
+    replacements.set(module, null);
+  };
+
+  for (const raw of content.split(/\r?\n/)) {
+    const { text } = stripGoComment(raw);
+    if (!text) continue;
+    if (block) {
+      if (text === ")") block = null;
+      else if (block === "use") noteUse(text);
+      else noteReplace(text);
+      continue;
+    }
+    const opened = text.match(/^(use|replace)\s*\($/);
+    if (opened) {
+      block = opened[1] as "use" | "replace";
+      continue;
+    }
+    const single = text.match(/^(use|replace)\s+(.*)$/);
+    if (!single) continue;
+    if (single[1] === "use") noteUse(single[2]);
+    else noteReplace(single[2].trim());
+  }
+  return { uses, replacements };
+}
+
+/**
+ * Apply a `replace` whose right-hand side names a module and a version.
+ *
+ * The distinction that matters is whether the module PATH changes. Same path
+ * is a version pin — an ordinary way to hold an upgrade — and it must behave
+ * exactly like writing that version on the `require` line, because it resolves
+ * to exactly the same module. Withholding the counterweight from it cost a
+ * *critical* on a server that had in fact upgraded, and the "a version is a
+ * claim, not evidence" argument does not separate the two cases: a plain
+ * `require X v9.9.9` mints the same unverifiable claim and always has.
+ *
+ * A different path is a fork, and a fork's version number describes the fork,
+ * not the SDK. Those stay unreadable.
+ */
+function applyReplacement(
+  dep: SdkDependency,
+  to: { name: string; version: string },
+): void {
+  if (to.name === dep.name) {
+    dep.constraint = to.version;
+    dep.sdkLine = classifyGoSdkVersion(to.name, to.version);
+    return;
+  }
+  dep.replaced = true;
+  dep.sdkLine = "unknown";
+}
+
+export function parseGoMod(content: string): SdkDependency[] {
+  const lines = content.split(/\r?\n/);
+  const deps: SdkDependency[] = [];
+  const replaced = new Set<string>();
+  const replacements = new Map<string, { name: string; version: string }>();
+
+  type GoBlock = "require" | "replace" | "exclude" | "retract";
+  let block: GoBlock | null = null;
+
+  const noteReplace = (text: string): void => {
+    // `replace a => b v1.0.0` and `replace a v1.2.3 => ./local` both name the
+    // replaced module first.
+    const unquote = (token: string) => token.replace(/^"(.*)"$/, "$1");
+    const module = unquote(text.split(/\s+/)[0] ?? "");
+    if (!module) return;
+
+    // A right-hand side that is itself `<module> <version>` is not opaque, and
+    // treating it as such was a one-line silencer: `replace X => X v1.6.1`
+    // changes nothing about the build, yet it cleared both MCP011 and MCP002
+    // off a genuinely legacy server. A replacement to a local path or a bare
+    // module stays unreadable, which is the honest answer for a fork.
+    const arrow = text.indexOf("=>");
+    if (arrow !== -1) {
+      const rhs = text.slice(arrow + 2).trim().split(/\s+/).map(unquote);
+      if (rhs.length === 2 && /^v\d/.test(rhs[1])) {
+        replacements.set(module, { name: rhs[0], version: rhs[1] });
+        return;
+      }
+    }
+    replaced.add(module);
+  };
+
+  const noteRequire = (text: string, lineNo: number, indirect: boolean): void => {
+    const entry = text.match(/^(\S+)\s+(\S+)$/);
+    if (!entry) return;
+    // go.mod's grammar admits quoted tokens. `go mod tidy` rewrites them, but
+    // the file is read as written, not as tidied.
+    const unquote = (token: string) => token.replace(/^"(.*)"$/, "$1");
+    const name = unquote(entry[1]);
+    const constraint = unquote(entry[2]);
+    if (!Object.hasOwn(MCP_GO_MODULES, name)) return;
+    deps.push({
+      ecosystem: "go",
+      name,
+      constraint,
+      manifest: "go.mod",
+      line: lineNo,
+      sdkLine: classifyGoSdkVersion(name, constraint),
+      ...(indirect ? { indirect: true } : {}),
+    });
+  };
+
+  for (let i = 0; i < lines.length; i++) {
+    const { text, indirect } = stripGoComment(lines[i]);
+    if (!text) continue;
+
+    if (block) {
+      if (text === ")") {
+        block = null;
+      } else if (block === "require") {
+        noteRequire(text, i + 1, indirect);
+      } else if (block === "replace") {
+        noteReplace(text);
+      }
+      continue;
+    }
+
+    const opened = text.match(/^(require|replace|exclude|retract)\s*\($/);
+    if (opened) {
+      block = opened[1] as GoBlock;
+      continue;
+    }
+
+    const single = text.match(/^(require|replace|exclude|retract)\s+(.*)$/);
+    if (!single) continue;
+    if (single[1] === "require") noteRequire(single[2].trim(), i + 1, indirect);
+    else if (single[1] === "replace") noteReplace(single[2].trim());
+  }
+
+  // A `replace` anywhere in the file overrides the requirement wherever it was
+  // written, so this has to be applied after the whole file has been read.
+  for (const dep of deps) {
+    const to = replacements.get(dep.name);
+    if (to) {
+      applyReplacement(dep, to);
+      continue;
+    }
+    if (!replaced.has(dep.name)) continue;
+    dep.replaced = true;
+    dep.sdkLine = "unknown";
+  }
+
+  return deps;
+}
+
+/**
+ * Collect Go module requirements from every `go.mod` under the scan root.
+ *
+ * Unlike `Cargo.toml`, this walks: a Go repository routinely keeps its server
+ * in a nested module, and reading only the root would miss it entirely. The
+ * Python collector already walks for the same reason. `go.work` is not read —
+ * see the limitation noted in the README.
+ */
+async function readGoModDependencies(
+  dir: string,
+  maxBytes: number,
+  maxFiles: number,
+): Promise<{ deps: SdkDependency[]; manifests: string[] }> {
+  const files = await collectMatchingFiles(dir, (name) => name === "go.mod", maxFiles);
+  // A `go.work` governs the modules its `use` directives name, resolved
+  // against its own directory — and nothing else. Keyed by the `go.mod` path
+  // each `use` resolves to, so a workspace cannot reach a module it does not
+  // claim, or one above itself.
+  const workFiles = await collectMatchingFiles(dir, (name) => name === "go.work", maxFiles);
+  const governed = new Map<string, Map<string, { name: string; version: string } | null>>();
+  for (const workFile of workFiles) {
+    const content = await readIfSmallEnough(workFile, maxBytes);
+    if (content === null) continue;
+    const work = parseGoWork(content);
+    if (work.replacements.size === 0) continue;
+    const workDir = path.dirname(workFile);
+    for (const use of work.uses) {
+      const useDir = path.resolve(workDir, use);
+      // Go discovers a `go.work` in the working directory or an ANCESTOR of
+      // it — never a descendant. Verified against the toolchain: with
+      // `playground/go.work` saying `use ..`, `go env GOWORK` is empty when
+      // building the root module from the root, and names the file only when
+      // building from `playground/`. So a workspace below a module does not
+      // govern it in any build you would run to test that module, and letting
+      // it was a one-line way to silence findings from a subdirectory.
+      if (path.relative(workDir, useDir).startsWith("..")) continue;
+      const manifest = path
+        .relative(dir, path.join(useDir, "go.mod"))
+        .split(path.sep)
+        .join("/");
+      // Escaping the scan root upward means nothing here can be governed.
+      if (manifest.startsWith("../")) continue;
+      const existing = governed.get(manifest);
+      if (!existing) {
+        governed.set(manifest, new Map(work.replacements));
+        continue;
+      }
+      // Two workspaces can both `use` one module, and real Go activates
+      // exactly one at a time — so any merge is a fiction. Last-writer-wins
+      // made it a fiction decided by readdir order: the same two workspace
+      // directories, renamed, gave different verdicts on byte-identical
+      // input. On a conflict the honest answer is that the checker cannot
+      // know which workspace is active, so the module goes unreadable.
+      for (const [module, replacement] of work.replacements) {
+        if (!existing.has(module)) {
+          existing.set(module, replacement);
+          continue;
+        }
+        const prior = existing.get(module);
+        const same =
+          prior === replacement ||
+          (prior != null &&
+            replacement != null &&
+            prior.name === replacement.name &&
+            prior.version === replacement.version);
+        if (!same) existing.set(module, null);
+      }
+    }
+  }
+
+  const deps: SdkDependency[] = [];
+  const manifests: string[] = [];
+  for (const file of files) {
+    const content = await readIfSmallEnough(file, maxBytes);
+    if (content === null) continue;
+    // Path separators are normalized here, once. Ownership compares these
+    // against match paths, and on win32 `path.relative` yields backslashes —
+    // which silently collapsed every module's directory to the repository root.
+    const relative = path.relative(dir, file).split(path.sep).join("/");
+    manifests.push(relative);
+    const workspace = governed.get(relative);
+    for (const dep of parseGoMod(content)) {
+      // A workspace replacement wins over whatever the module file says — and
+      // is read the same way, so the identical directive means the same thing
+      // wherever it is written.
+      const scoped = { ...dep, manifest: relative };
+      if (workspace?.has(dep.name)) {
+        const to = workspace.get(dep.name);
+        if (to) applyReplacement(scoped, to);
+        else {
+          scoped.replaced = true;
+          scoped.sdkLine = "unknown";
+        }
+      }
+      deps.push(scoped);
+    }
+  }
+  return { deps, manifests };
+}
+
+/**
+ * Read-only, never through a symlink, and never blocking on the open itself.
+ *
+ * `O_NOFOLLOW` refuses a symlink atomically, so there is no check-then-open
+ * window. `O_NONBLOCK` is what makes the fifo case work at all: opening a fifo
+ * read-only *blocks until a writer appears*, so the `isFile()` guard below was
+ * never reached — the walk protected itself with a dirent check, but the root
+ * manifests do not come from the walk, and a fifo named `package.json` hung the
+ * scan exactly as `pipe.go` once did. On a regular file both flags are inert.
+ *
+ * Both are POSIX; where a platform does not define them this degrades to a
+ * plain read-only open and the `isFile()` check carries what weight it can.
+ */
+const SAFE_READ_FLAGS =
+  constants.O_RDONLY |
+  (typeof constants.O_NOFOLLOW === "number" ? constants.O_NOFOLLOW : 0) |
+  (typeof constants.O_NONBLOCK === "number" ? constants.O_NONBLOCK : 0);
+
+/**
+ * Read a file, or return null if it is too large, not a regular file, or
+ * unreadable.
  *
  * The handle is opened once and both stat and read go through it, so nothing
  * can be swapped underneath between the two.
+ *
+ * The `isFile()` check is not redundant with the walk. A FIFO reports size 0,
+ * so the size guard waves it through and `readFile` then blocks until some
+ * writer appears — forever, in practice. A repository containing a fifo named
+ * `pipe.go` hung `mcpcheck --source`, and therefore the GitHub Action, with no
+ * timeout anywhere above to break it.
  */
 async function readIfSmallEnough(
   file: string,
@@ -589,8 +1292,14 @@ async function readIfSmallEnough(
 ): Promise<string | null> {
   let handle: import("node:fs/promises").FileHandle | undefined;
   try {
-    handle = await fs.open(file, "r");
+    // O_NOFOLLOW refuses a symlink in the open itself, so there is no window
+    // between checking and opening — the same reasoning as the single handle
+    // above. The walk already rejects symlinked entries, but the root
+    // manifests do not come from the walk, and `package.json` and `Cargo.toml`
+    // were still readable through one.
+    handle = await fs.open(file, SAFE_READ_FLAGS);
     const stat = await handle.stat();
+    if (!stat.isFile()) return null;
     if (stat.size > maxBytes) return null;
     return await handle.readFile("utf8");
   } catch {
@@ -616,7 +1325,17 @@ async function collectFiles(dir: string, cap: number): Promise<string[]> {
       if (e.isDirectory()) {
         if (IGNORED_DIRS.has(e.name)) continue;
         await walk(full);
-      } else if (SCANNABLE.has(path.extname(e.name))) {
+      } else if (e.isFile() && SCANNABLE.has(path.extname(e.name))) {
+        // `isFile()` is the guard, not `!isDirectory()`. A symlink is neither,
+        // and following one leaves the tree being scanned: `escape.go ->
+        // ../../secrets.env` was read and its lines reported as
+        // `escape.go:2`, i.e. content from outside the repository attributed
+        // to a path inside it. Sockets and FIFOs are excluded here for the
+        // same reason `readIfSmallEnough` re-checks — see there.
+        //
+        // Symlinked *directories* are already skipped by the branch above,
+        // which is what keeps the walk from looping. Do not "fix" that into
+        // following them.
         out.push(full);
       }
     }
@@ -625,7 +1344,22 @@ async function collectFiles(dir: string, cap: number): Promise<string[]> {
   return out;
 }
 
-async function collectPythonDependencyFiles(dir: string, cap: number): Promise<string[]> {
+/**
+ * Walk the tree for manifests whose basename `match` accepts.
+ *
+ * One walker for Python's several dependency files and Go's `go.mod`, because
+ * three copies of the same recursion drifted apart once already — only the
+ * source-file walk kept the ignore list current.
+ *
+ * `entry.isFile()` rather than `!entry.isDirectory()`, for the reason spelled
+ * out in `collectFiles`: a symlinked `go.mod` would otherwise be read from
+ * outside the tree being scanned.
+ */
+async function collectMatchingFiles(
+  dir: string,
+  match: (name: string) => boolean,
+  cap: number,
+): Promise<string[]> {
   const out: string[] = [];
   async function walk(current: string): Promise<void> {
     if (out.length >= cap) return;
@@ -641,7 +1375,7 @@ async function collectPythonDependencyFiles(dir: string, cap: number): Promise<s
       if (entry.isDirectory()) {
         if (IGNORED_DIRS.has(entry.name)) continue;
         await walk(full);
-      } else if (isPythonDependencyFile(entry.name)) {
+      } else if (entry.isFile() && match(entry.name)) {
         out.push(full);
       }
     }

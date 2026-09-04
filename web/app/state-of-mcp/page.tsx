@@ -135,9 +135,10 @@ function Row({
 }
 
 /**
- * The rules a live probe can reach. MCP007, MCP009 and MCP010 read a manifest
- * — package.json, Python project metadata, Cargo.toml — so they only ever fire
- * on a source scan and would show a misleading zero in this table.
+ * The rules a live probe can reach. MCP007, MCP009, MCP010 and MCP011 read a
+ * manifest — package.json, Python project metadata, Cargo.toml, go.mod — so
+ * they only ever fire on a source scan and would show a misleading zero in
+ * this table.
  */
 const RULES = [
   {
@@ -387,7 +388,7 @@ export default function StateOfMcp() {
 
         <Section
           title="What fired"
-          lede={`Findings across the ${count(S.graded)} graded endpoints. A live probe only sees the outside, so the three rules that read a manifest — the TypeScript, Python and Rust SDK versions — cannot appear here at all.`}
+          lede={`Findings across the ${count(S.graded)} graded endpoints. A live probe only sees the outside, so the four rules that read a manifest — the TypeScript, Python, Rust and Go SDK versions — cannot appear here at all.`}
         >
           <div className="overflow-x-auto rounded-xl border border-white/10 bg-raised">
             <table className="w-full min-w-[520px] border-collapse text-[14px]">

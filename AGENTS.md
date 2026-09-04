@@ -41,15 +41,21 @@ before writing a `fix` string. See the README section "A rule that was wrong".
 
 ```bash
 npm run typecheck    # core + tests + (separately) web
-npm test             # 119 assertions
+npm test             # the full suite
 npm run build:skill  # then check git status is clean
 ```
 
 The fixtures under `skill/mcp-migration-workspace/fixtures` are test material,
-not examples to fix. `acme-search-mcp` is genuinely broken; `notes-mcp` is
-mostly a false-positive trap — its `sessionId` is `express-session` for an
-admin UI, and its MCP transport already runs stateless. An agent that
-"migrates" `notes-mcp` has failed.
+not examples to fix. `acme-search-mcp` and `go-notes-mcp` are genuinely broken;
+`notes-mcp` is mostly a false-positive trap — its `sessionId` is
+`express-session` for an admin UI, and its MCP transport already runs
+stateless. An agent that "migrates" `notes-mcp` has failed, and the same is
+true of `rust-notes-mcp` and `go-tasks-mcp`.
+
+`go-tasks-mcp` carries a second job. It contains no modern protocol literal at
+all, because a migrated Go server has none — the SDK answers `server/discover`
+internally — so its `go.mod` is the only evidence it is current. If that
+evidence feed ever breaks, this fixture stops grading A. CI asserts on it.
 
 ## Adding a rule
 

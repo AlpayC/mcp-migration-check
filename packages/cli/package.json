@@ -28,7 +28,8 @@
     "cli",
     "typescript",
     "python",
-    "rust"
+    "rust",
+    "go"
   ],
   "repository": {
     "type": "git",

@@ -102,13 +102,14 @@ const EXAMPLES: Array<{ label: string; url: string; auth: "open" | "oauth" }> =
 
 /**
  * Languages a source scan reads, each with the rule that checks its SDK
- * manifest. Go source is scanned for the language-neutral signals too, but its
- * SDK moved to a 1.x minor rather than a new major, so no rule covers it yet.
+ * manifest. C# is absent because `.cs` is not scanned at all, so listing it
+ * would promise a check that does not happen.
  */
 const SOURCE_LANGUAGES = [
   { name: "TypeScript", rule: "MCP007" },
   { name: "Python", rule: "MCP009" },
   { name: "Rust", rule: "MCP010" },
+  { name: "Go", rule: "MCP011" },
 ];
 
 /** What the checker looks for — shown as a ticker under the hero. */
@@ -123,6 +124,7 @@ const RULES = [
   { id: "MCP008", label: "No server/discover" },
   { id: "MCP009", label: "Python SDK on the v1 line" },
   { id: "MCP010", label: "Rust crate on a pre-2026-07-28 line" },
+  { id: "MCP011", label: "Go SDK not serving 2026-07-28" },
   { id: "MCP101", label: "Dual-era (not a defect)" },
   { id: "MCP102", label: "Legacy-only session ids (not a defect)" },
 ];
@@ -236,7 +238,7 @@ export default function Home() {
             The 2026-07-28 revision made MCP stateless, formalized OAuth 2.1,
             and dropped several capabilities — a refactor, not a version bump.
             Point the browser checker at a running endpoint, or use the CLI and
-            GitHub Action to scan TypeScript, Python and Rust servers.
+            GitHub Action to scan TypeScript, Python, Rust and Go servers.
           </p>
         </BlurFade>
 
@@ -466,7 +468,8 @@ export default function Home() {
                       a clean bill of health for the whole revision: MCP007
                       needs a <code>package.json</code>, MCP009 needs Python
                       project metadata or source, MCP010 needs a{" "}
-                      <code>Cargo.toml</code>, and complete validation of the
+                      <code>Cargo.toml</code>, MCP011 needs a{" "}
+                      <code>go.mod</code>, and complete validation of the
                       required <code>resultType</code> field,{" "}
                       <code>subscriptions/listen</code> and the new request
                       headers are all outside what an outside-in probe can see.
@@ -507,8 +510,8 @@ export default function Home() {
             <p className="mt-3 text-[14.5px] leading-relaxed text-muted">
               The browser is the fastest outside-in check. The same
               deterministic engine ships as a zero-install CLI, a GitHub Action,
-              and an agent skill. Their source checks scan TypeScript, Python
-              and Rust repositories; the skill also works through each
+              and an agent skill. Their source checks scan TypeScript, Python,
+              Rust and Go repositories; the skill also works through each
               remediation.
             </p>
 
@@ -519,7 +522,7 @@ export default function Home() {
                 </div>
                 <p className="mt-1 text-[13px] leading-relaxed text-muted">
                   No install and no runtime dependencies. Probe a URL or scan a
-                  TypeScript, Python or Rust repository, including SDK
+                  TypeScript, Python, Rust or Go repository, including SDK
                   constraints.
                 </p>
                 <pre className="mt-3 overflow-x-auto rounded-lg border border-white/10 bg-input p-3 font-mono text-[12px] leading-relaxed text-foreground">
@@ -533,9 +536,9 @@ npx mcp-migration-check --source .`}</code>
                   Gate every pull request
                 </div>
                 <p className="mt-1 text-[13px] leading-relaxed text-muted">
-                  The bundled Action scans TypeScript, Python and Rust projects
-                  and fails only when the selected severity threshold is
-                  reached.
+                  The bundled Action scans TypeScript, Python, Rust and Go
+                  projects and fails only when the selected severity threshold
+                  is reached.
                 </p>
                 <pre className="mt-3 overflow-x-auto rounded-lg border border-white/10 bg-input p-3 font-mono text-[12px] leading-relaxed text-foreground">
                   <code>{`- uses: AlpayC/mcp-migration-check@v1

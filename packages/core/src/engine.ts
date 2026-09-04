@@ -1,4 +1,4 @@
-import { rules } from "./rules";
+import { resetGoScope, rules } from "./rules";
 import type { Finding, Grade, RuleContext, Severity } from "./types";
 
 /**
@@ -26,6 +26,11 @@ export function gradeFrom(findings: Finding[]): Grade {
 
 /** Run every rule over the context and return findings ordered by severity. */
 export function evaluate(ctx: RuleContext): Finding[] {
+  // The rules share a derived index over the source context (Go module
+  // ownership). Build it fresh for this run rather than trying to decide when
+  // a cached one has gone stale — the context is a mutable object, and the
+  // question does not need to exist.
+  resetGoScope();
   const order: Severity[] = ["critical", "warning", "info"];
   return rules
     .map((r) => r.evaluate(ctx))

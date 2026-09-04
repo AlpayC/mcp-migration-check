@@ -7,7 +7,7 @@ may take a few days.
 
 ```bash
 npm install          # from the repo root, not from a workspace
-npm test             # 119 assertions, no network, no disk
+npm test             # the full suite, no network, no disk
 npm run typecheck    # engine + tests, then web separately
 ```
 

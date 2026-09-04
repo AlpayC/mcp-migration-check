@@ -55,21 +55,31 @@ takes a week.
 
 ### Languages
 
-A source scan reads **TypeScript, Python, and Rust** MCP servers, each with a
-dependency check against the manifest that pins its SDK:
+A source scan reads **TypeScript, Python, Rust, and Go** MCP servers, each with
+a dependency check against the manifest that pins its SDK:
 
 | Language                    | Manifest read                                              | SDK rule   |
 | --------------------------- | ---------------------------------------------------------- | ---------- |
 | **TypeScript / JavaScript** | `package.json`                                              | **MCP007** |
 | **Python**                  | `pyproject.toml`, `requirements*.txt`, `Pipfile`, `setup.cfg` | **MCP009** |
 | **Rust**                    | `Cargo.toml`                                                | **MCP010** |
-| Go                          | —                                                           | none yet   |
+| **Go**                      | `go.mod`                                                    | **MCP011** |
+| C#                          | —                                                           | none yet   |
 
-Every language above is also grepped for the protocol signals behind
-MCP001–MCP005, which are language-neutral. Go source is scanned for those
-signals too, but no Go SDK rule exists yet: that SDK moved to a 1.x minor rather
-than a new major, so the TypeScript and Python migration advice does not carry
-over. A live probe needs no language at all — it only speaks HTTP.
+Every language with a rule above is also grepped for the protocol signals
+behind MCP001–MCP005, which are language-neutral. **C# is not scanned at all** — the
+scanner does not read `.cs` files and there is no C# SDK rule, so a source scan
+of a C# server reports nothing and that clean result means nothing. That SDK
+moved to a 2.x major of the `ModelContextProtocol` packages, so the TypeScript
+and Python migration advice does not carry over either. Probe a C# server live
+instead: a live probe needs no language at all, it only speaks HTTP.
+
+**Go is the one that does not rhyme.** The other three SDKs announce the
+protocol break in the version number — a new major, or a rename. Go did not:
+`github.com/modelcontextprotocol/go-sdk` crossed it at the **v1.6.1 → v1.7.0
+minor**, on the same module path, and there is no `go-sdk/v2` to migrate to.
+So MCP011 compares full release triples rather than majors, and its advice
+never tells anyone to change an import path.
 
 ---
 
@@ -215,15 +225,16 @@ node skill/mcp-migration/scripts/mcpcheck.mjs --local http://localhost:3000/mcp
 | MCP008 | warning  | modern server that does not implement `server/discover`              |
 | MCP009 | warning  | Python `mcp` constrained to 1.x or importing the v1 `FastMCP` API    |
 | MCP010 | warning  | Rust MCP crate on a pre-2026-07-28 line (source scan only)            |
+| MCP011 | warning  | Go MCP SDK that cannot serve 2026-07-28 (source scan only)           |
 | MCP101 | info     | dual-era: current **and** still accepts the legacy handshake         |
 | MCP102 | info     | session ids issued to legacy clients only                            |
 
 Live checks observe runtime behavior over HTTP; source scans grep for the same
 signals in code. Beside the source they read each language's manifest — Python's
 `pyproject.toml`, requirements files, `Pipfile` and `setup.cfg` (including
-nested projects), and Rust's `Cargo.toml` — for the SDK rules in
-[Languages](#languages). Each finding links the spec or official SDK migration
-page it derives from.
+nested projects), Rust's `Cargo.toml`, and Go's `go.mod` (including nested
+modules) — for the SDK rules in [Languages](#languages). Each finding links the
+spec or official SDK migration page it derives from.
 
 **Backwards compatibility is not a finding.** The `MCP1xx` rules are
 observations and cost zero points. `2026-07-28` says a server that wants to
@@ -249,17 +260,17 @@ the absence of the modern surface is a defect.
   Treat source findings as signals to review, not proof. The live probe is
   more authoritative for runtime behavior; the two complement each other.
 - **The web demo only sees the outside.** It probes over HTTP, so it cannot
-  reach the SDK rules: MCP007 needs `package.json`, while MCP009 needs Python
-  project metadata or source. Use the skill or CLI for repository checks.
+  reach the SDK rules: MCP007 needs `package.json`, MCP009 needs Python
+  project metadata or source, MCP010 needs `Cargo.toml`, and MCP011 needs
+  `go.mod`. Use the skill or CLI for repository checks.
 - **MCP001 proves absence, which is the weaker claim.** It fires when the
   legacy handshake answers and no modern signal did. A server whose modern
   surface is hidden behind a WAF, a path-based gateway or an unfamiliar-method
   filter lands there wrongly. The dual-era observation cannot fail the same
   way — it needs a positive modern answer to fire at all.
-- **SDK dependency checks currently cover TypeScript, Python, and Rust.** Go
-  and C# servers still get the language-neutral source signals, but no
-  SDK-version finding. Those SDKs moved differently, so do not apply the
-  TypeScript or Python migration advice to them.
+- **A source scan does not read C# at all.** `.cs` is not in the scanned
+  extension list, so a C# repository produces no findings and no signals — not
+  a clean bill of health, an empty one. Probe those servers live.
 - **The Rust `Cargo.toml` parser is line-oriented and reads only the root
   manifest.** It reads `[dependencies]`, `[dev-dependencies]` and
   `[workspace.dependencies]`, in the inline-string, inline-table and
@@ -269,6 +280,53 @@ the absence of the modern surface is a defect.
   with no quoted version (`{ git = "…" }`). A clean MCP010 result means the root
   manifest is clean — workspace-inherited dependencies may still use an older
   crate version.
+- **The `go.mod` parser walks, but it is not the Go toolchain.** It reads
+  `require` in both the single-line and block forms across every `go.mod` under
+  the scan root. It deliberately reports nothing for four kinds of requirement,
+  because in each the version string does not describe what would actually
+  build: one replaced by a local path or by a *different* module path — a fork,
+  whose version describes the fork and not the SDK, while a same-path `replace`
+  is a version pin and is read from its right-hand side — a pseudo-version such
+  as `v1.6.2-0.20260801000000-abcdef123456`
+  (which names a commit, not a release), a `+incompatible` tag, and one marked
+  `// indirect` (which the toolchain maintains to mean nothing here imports it).
+  `go.work` is read for `replace` directives only — a workspace replacement
+  overrides the module-level one, so ignoring it reported versions the build
+  never resolves — but not for anything else. A workspace governs only the
+  modules its `use` directives name, resolved against its own directory, and
+  only those at or below it: Go discovers a `go.work` in the working directory
+  or an ancestor, never a descendant, so a workspace buried in a subdirectory
+  is not in effect for the module above it. A `use` pointing through a symlink
+  is ignored, and two workspaces that disagree about one module leave it
+  unreadable rather than letting directory order decide. A clean MCP011 result
+  therefore means no *classifiable* requirement is behind — a workspace or a
+  replaced module can still be.
+- **Go comments and strings are scanned, not parsed.** The transport signals
+  skip `//` comments and string literals, including multi-line backtick
+  strings and `/* … */` comments — a server's own `--stateless` help text
+  should not be read as configuration, and a backtick quoted inside a comment
+  is not a string. The tracking is lexical, so a file that opens a backtick
+  string or a block comment and never closes it hides the rest of itself from
+  those two signals. Such a file does not compile, so it cannot be a working
+  server, but it can suppress MCP011's second case in a scan.
+- **MCP011's second case argues from absence.** A modern `go-sdk` serving
+  streamable HTTP is only flagged when the stateless opt-in appears *nowhere*
+  in the module that declares the requirement. Test files (`*_test.go`) and
+  commented-out code are excluded from both halves of that judgement, and
+  `WithStateLess(false)` is read as what it is. If your server sets `Stateless`
+  somewhere the scan cannot see — in another module, or from a config value —
+  the finding is a false positive; it costs a warning and nothing else. It
+  never fires for stdio servers, which need no opt-in, nor for `mcp-go`, which
+  advertises the revision by default. The absence is judged per *module*, not
+  per binary, so a module holding both a stateless and a stateful command —
+  a `cmd/` layout with several `main` packages — is not reported. Pairing them
+  more tightly would break the equally ordinary shape where the options value
+  is built in a shared helper package, which is the worse trade.
+- **An unclassifiable requirement is quiet, not exonerating.** A `replace`d
+  module, a pseudo-version and a `+incompatible` tag produce no MCP011 finding
+  — and equally no modern-era evidence, because none is available. The
+  language-neutral heuristics behind MCP001 and MCP002 still apply to that
+  repository exactly as they would to one with no manifest at all.
 
 ## Two rules that were wrong
 
@@ -353,7 +411,7 @@ scripts/ecosystem-report.mjs registry-wide readiness snapshot
 ```
 
 ```bash
-npm test              # node --test via tsx; 110 assertions, no network
+npm test              # node --test via tsx; the full suite, no network
 npm run typecheck
 npm run build:bundles # regenerate both copies of the engine; CI fails if stale
 ```

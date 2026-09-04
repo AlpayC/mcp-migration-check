@@ -21,6 +21,20 @@
       "prompt": "kannst du mal prüfen ob mein rust-notes-mcp server bereit ist für die 2026-07-28 spec? liegt im ordner rust-notes-mcp/. bitte noch nichts umbauen, ich will erstmal wissen woran ich bin",
       "expected_output": "MCP010 fires — Cargo.toml pins rmcp = \"1.2.0\", a pre-2026-07-28 line; rmcp 3.x is the current line. Should not refactor anything (the user asked for diagnosis only).",
       "files": ["rust-notes-mcp/"]
+    },
+    {
+      "id": 3,
+      "name": "triage-go-minor-version-break",
+      "prompt": "unser go-notes-mcp server soll auf die 2026-07-28 spec. kannst du schauen was da dran ist und es dann auch gleich machen? liegt in go-notes-mcp/",
+      "expected_output": "MCP011 fires: go.mod requires github.com/modelcontextprotocol/go-sdk v1.6.1, below v1.7.0 — the first release speaking 2026-07-28. Must upgrade to v1.7.0 on the SAME module path and must NOT advise a /v2 import path or a 2.x major: the Go SDK crossed the break inside its v1 line and no go-sdk/v2 module exists. Also fires MCP001, MCP002 (the per-session notes map is real state, unlike the go-tasks-mcp trap), MCP003 and MCP005 — the deprecated logging and roots calls. A correct migration upgrades the requirement, drops the GetSessionID option and the InitializedHandler, and moves the notes map behind an explicit handle passed as a tool argument.",
+      "files": ["go-notes-mcp/"]
+    },
+    {
+      "id": 4,
+      "name": "triage-go-false-positive-readiness",
+      "prompt": "kannst du mal prüfen ob mein go-tasks-mcp server bereit ist für die 2026-07-28 spec? liegt im ordner go-tasks-mcp/. bitte noch nichts umbauen, ich will erstmal wissen woran ich bin",
+      "expected_output": "Clean: no findings, grade A. The server is already on go-sdk v1.7.0 and its streamable HTTP transport sets Stateless: true, which is what serves 2026-07-28 at all. Both sessionId hits are FALSE POSITIVES — TaskArgs.SessionID is a caller-supplied handle passed as an ordinary tool argument (precisely what MCP002's own remediation recommends) and adminSession is a cookie for the operator UI on a separate surface. Must NOT refactor anything, must NOT remove Stateless: true (that would downgrade the server to 2025-11-25), and must not read the absence of modern protocol literals as evidence of anything: the Go SDK answers server/discover internally, so go.mod is the only place modernity is visible.",
+      "files": ["go-tasks-mcp/"]
     }
   ]
 }

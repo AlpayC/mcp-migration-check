@@ -77,12 +77,20 @@ jobs:
           python_v2=$(node skill/mcp-migration/scripts/mcpcheck.mjs \
             --source skill/mcp-migration-workspace/fixtures/python-v2-mcp --json)
           python_v2_code=$?
+          go_notes=$(node skill/mcp-migration/scripts/mcpcheck.mjs \
+            --source skill/mcp-migration-workspace/fixtures/go-notes-mcp --json)
+          go_notes_code=$?
+          go_tasks=$(node skill/mcp-migration/scripts/mcpcheck.mjs \
+            --source skill/mcp-migration-workspace/fixtures/go-tasks-mcp --json)
+          go_tasks_code=$?
           set -e
 
           [ "$acme_code" = "1" ]  || { echo "acme: expected exit 1, got $acme_code"; exit 1; }
           [ "$notes_code" = "1" ] || { echo "notes: expected exit 1, got $notes_code"; exit 1; }
           [ "$python_v1_code" = "1" ] || { echo "python v1: expected exit 1, got $python_v1_code"; exit 1; }
           [ "$python_v2_code" = "0" ] || { echo "python v2: expected exit 0, got $python_v2_code"; exit 1; }
+          [ "$go_notes_code" = "1" ] || { echo "go notes: expected exit 1, got $go_notes_code"; exit 1; }
+          [ "$go_tasks_code" = "0" ] || { echo "go tasks: expected exit 0, got $go_tasks_code"; exit 1; }
 
           echo "$acme"  | jq -e '[.findings[].ruleId] == ["MCP001","MCP002","MCP003","MCP005","MCP007"]' > /dev/null
           echo "$acme"  | jq -e '.grade.letter == "F"' > /dev/null
@@ -97,6 +105,19 @@ jobs:
 
           echo "$python_v2" | jq -e '.findings == []' > /dev/null
           echo "$python_v2" | jq -e '.grade.letter == "A"' > /dev/null
+
+          echo "$go_notes" | jq -e '[.findings[].ruleId] == ["MCP001","MCP002","MCP003","MCP005","MCP011"]' > /dev/null
+          echo "$go_notes" | jq -e '.grade.letter == "F"' > /dev/null
+
+          # go-tasks-mcp is the Go trap, and it earns its place twice over. Its
+          # sessionId hits are a tool argument and an admin cookie, so a clean
+          # run proves they are not read as MCP session state. And it contains
+          # no modern protocol literal at all — a migrated Go server has none,
+          # because the SDK answers server/discover internally — so grading A
+          # is what proves the go.mod evidence feed still works. If that feed
+          # breaks, MCP002 fires here and this line catches it.
+          echo "$go_tasks" | jq -e '.findings == []' > /dev/null
+          echo "$go_tasks" | jq -e '.grade.letter == "A"' > /dev/null
 
           echo "fixtures ok"
 

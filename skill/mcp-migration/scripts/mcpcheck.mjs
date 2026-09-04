@@ -20,7 +20,14 @@ var SPEC = {
   rustSdkReleases: "https://github.com/modelcontextprotocol/rust-sdk/releases",
   // Per-SDK authoritative references for MCP010 multi-crate coverage.
   towerMcp: "https://github.com/joshrotenberg/tower-mcp",
-  rustMcpSdk: "https://github.com/rust-mcp-stack/rust-mcp-sdk"
+  rustMcpSdk: "https://github.com/rust-mcp-stack/rust-mcp-sdk",
+  // Go's own story is not on the spec site either. `SPEC.sdk` above — the SDK
+  // announcement — is the document that states both halves of it: which release
+  // speaks the revision, and that serving it over HTTP is a separate opt-in, so
+  // MCP011 cites that as its specRef. These two are the version-pinned package
+  // pages it carries as supporting references.
+  goSdk: "https://pkg.go.dev/github.com/modelcontextprotocol/go-sdk@v1.7.0/mcp",
+  markThreeLabsMcpGo: "https://pkg.go.dev/github.com/mark3labs/mcp-go@v1.0.0/mcp"
 };
 var SPEC_VERIFIED_AT = {
   [SPEC.transport]: "2026-08-23",
@@ -39,18 +46,107 @@ var SPEC_VERIFIED_AT = {
   [SPEC.rustSdk]: "2026-08-22",
   [SPEC.rustSdkReleases]: "2026-08-28",
   [SPEC.towerMcp]: "2026-08-28",
-  [SPEC.rustMcpSdk]: "2026-08-28"
+  [SPEC.rustMcpSdk]: "2026-08-28",
+  // Read against the module proxy and the module source on the same day: the
+  // package pages are version-pinned, so they cannot drift the way a moving
+  // `@latest` page would.
+  [SPEC.goSdk]: "2026-09-03",
+  [SPEC.markThreeLabsMcpGo]: "2026-09-03"
 };
 var rulesVerifiedAt = Object.values(SPEC_VERIFIED_AT).sort()[0];
+function goSdkUnclassifiable(ctx, match) {
+  const owner = owningGoManifest(ctx, match.file);
+  if (owner === null) return false;
+  const deps = (ctx.source?.sdkDependencies ?? []).filter(
+    (d) => d.ecosystem === "go" && d.manifest === owner
+  );
+  return deps.length > 0 && deps.every((d) => d.sdkLine === "unknown");
+}
 function firstMatch(ctx, signal) {
   return ctx.source?.matches[signal]?.[0];
 }
 function loc(match) {
   return match ? `${match.file}:${match.line}` : void 0;
 }
-function servesModern(ctx) {
+function clamp(value, max = 80) {
+  return value.length <= max ? value : `${value.slice(0, max)}\u2026`;
+}
+function dirOf(manifest) {
+  const p = manifest.replace(/\\/g, "/");
+  return p.includes("/") ? p.slice(0, p.lastIndexOf("/") + 1) : "";
+}
+function isGoPath(file) {
+  const base = file.replace(/\\/g, "/").split("/").pop() ?? "";
+  return base.endsWith(".go") || base === "go.mod";
+}
+var goScope = null;
+function resetGoScope() {
+  goScope = null;
+}
+function goScopeOf(ctx) {
+  const key = ctx.source ?? ctx;
+  if (goScope && goScope.key === key) return goScope.scope;
+  const manifests = new Set(ctx.source?.goManifests ?? []);
+  for (const dep of ctx.source?.sdkDependencies ?? []) {
+    if (dep.ecosystem === "go") manifests.add(dep.manifest);
+  }
+  const dirs = [...manifests].map((manifest) => ({ dir: dirOf(manifest), manifest })).sort((a, b) => b.dir.length - a.dir.length);
+  const scope = {
+    dirs,
+    owner: /* @__PURE__ */ new Map(),
+    hasNonGoEvidence: false,
+    hasOrphanGoEvidence: false,
+    goEvidenceOwners: /* @__PURE__ */ new Set(),
+    anyEvidence: false
+  };
+  const resolve = (file) => {
+    const normalized = file.replace(/\\/g, "/");
+    for (const { dir, manifest } of scope.dirs) {
+      if (normalized.startsWith(dir)) return manifest;
+    }
+    return null;
+  };
+  for (const match of ctx.source?.matches.modernEra ?? []) {
+    scope.anyEvidence = true;
+    if (!isGoPath(match.file)) {
+      scope.hasNonGoEvidence = true;
+      continue;
+    }
+    const owner = resolve(match.file);
+    if (owner === null) scope.hasOrphanGoEvidence = true;
+    else scope.goEvidenceOwners.add(owner);
+  }
+  scope.resolve = resolve;
+  goScope = { key, scope };
+  return scope;
+}
+function owningGoManifest(ctx, file) {
+  const scope = goScopeOf(ctx);
+  const cached = scope.owner.get(file);
+  if (cached !== void 0) return cached;
+  const owner = scope.resolve(file);
+  scope.owner.set(file, owner);
+  return owner;
+}
+function ownedBy(ctx, manifest) {
+  const own = dirOf(manifest);
+  const deeper = goScopeOf(ctx).dirs.map((d) => d.dir).filter((dir) => dir !== own && dir.startsWith(own));
+  return (match) => {
+    const file = match.file.replace(/\\/g, "/");
+    if (!file.startsWith(own)) return false;
+    return !deeper.some((dir) => file.startsWith(dir));
+  };
+}
+function servesModern(ctx, forFile) {
   if (ctx.live && (ctx.live.era === "modern" || ctx.live.era === "dual")) return true;
-  return (ctx.source?.matches.modernEra?.length ?? 0) > 0;
+  const scope = goScopeOf(ctx);
+  if (!scope.anyEvidence) return false;
+  if (!forFile) return true;
+  if (!isGoPath(forFile)) return scope.hasNonGoEvidence;
+  if (scope.hasNonGoEvidence) return true;
+  const owner = owningGoManifest(ctx, forFile);
+  if (owner === null) return scope.hasOrphanGoEvidence || scope.goEvidenceOwners.size > 0;
+  return scope.goEvidenceOwners.has(owner);
 }
 function versionsClause(ctx) {
   const v = ctx.live?.supportedVersions ?? [];
@@ -63,15 +159,16 @@ var rules = [
     severity: "critical",
     specRef: SPEC.versioning,
     evaluate(ctx) {
-      if (servesModern(ctx)) return null;
+      const unacquitted = (signal) => ctx.source?.matches[signal]?.find((m) => !servesModern(ctx, m.file));
       const live = ctx.live?.respondsToLegacyInitialize;
-      const v1PythonApi = firstMatch(ctx, "pythonV1Sdk");
+      if (live && servesModern(ctx)) return null;
+      const v1PythonApi = unacquitted("pythonV1Sdk");
       const v1PythonRequirement = ctx.source?.pythonSdkRequirements?.some(
         (candidate) => candidate.sdkLine === "legacy"
       );
-      const constrainedPythonServer = v1PythonRequirement ? firstMatch(ctx, "pythonServerSdk") : void 0;
+      const constrainedPythonServer = v1PythonRequirement ? unacquitted("pythonServerSdk") : void 0;
       const legacyPythonServer = v1PythonApi ?? constrainedPythonServer;
-      const src = firstMatch(ctx, "initialize") ?? legacyPythonServer;
+      const src = unacquitted("initialize") ?? legacyPythonServer;
       if (!live && !src) return null;
       const negotiated = ctx.live?.legacyProtocolVersion;
       return {
@@ -92,7 +189,9 @@ var rules = [
     specRef: SPEC.transport,
     evaluate(ctx) {
       const live = ctx.live?.sessionIdOnModernRequest;
-      const src = servesModern(ctx) ? void 0 : firstMatch(ctx, "sessionId");
+      const src = ctx.source?.matches.sessionId?.find(
+        (m) => !servesModern(ctx, m.file) && !goSdkUnclassifiable(ctx, m)
+      );
       if (!live && !src) return null;
       return {
         ruleId: "MCP002",
@@ -302,6 +401,56 @@ var rules = [
       };
     }
   },
+  {
+    id: "MCP011",
+    title: "Go MCP SDK not serving the 2026-07-28 revision",
+    severity: "warning",
+    specRef: SPEC.sdk,
+    references: [SPEC.goSdk, SPEC.markThreeLabsMcpGo],
+    evaluate(ctx) {
+      const deps = (ctx.source?.sdkDependencies ?? []).filter((d) => d.ecosystem === "go");
+      if (deps.length === 0) return null;
+      const hits = [];
+      for (const dep of deps) {
+        if (dep.indirect || dep.sdkLine === "unknown") continue;
+        if (dep.sdkLine === "legacy") {
+          const target = dep.name === "github.com/mark3labs/mcp-go" ? "v1.0.0" : "v1.7.0";
+          hits.push({
+            location: `${dep.manifest}:${dep.line ?? 0}`,
+            detail: `${dep.manifest} requires ${dep.name} ${clamp(dep.constraint)}, which is below ${target} \u2014 the first release of that module speaking 2026-07-28.`,
+            fix: `Upgrade ${dep.name} to ${target} or later (\`go get ${dep.name}@${target}\`), then run your tests. The module path does not change: Go crossed the protocol break inside its existing major, so there is no v2 import path to rewrite.`
+          });
+        }
+      }
+      for (const dep of deps) {
+        if (dep.name !== "github.com/modelcontextprotocol/go-sdk") continue;
+        if (dep.sdkLine !== "modern" || dep.indirect) continue;
+        const owned = ownedBy(ctx, dep.manifest);
+        const http = ctx.source?.matches.goStreamableHttp?.find(owned);
+        if (!http) continue;
+        if (ctx.source?.matches.goStatelessOptIn?.some(owned)) continue;
+        hits.push({
+          location: `${dep.manifest}:${dep.line ?? 0}`,
+          detail: `${dep.manifest} requires ${dep.name} ${clamp(dep.constraint)}, which speaks 2026-07-28, but the streamable HTTP transport at ${http.file}:${http.line} is configured without \`Stateless\`. That transport serves the revision only when it is stateless; left as is, clients negotiate down to 2025-11-25.`,
+          fix: "Set `Stateless: true` in `StreamableHTTPOptions`, and move any per-session state onto explicit handles passed as tool arguments. Upgrading the module is not enough on its own \u2014 serving the revision over HTTP is a separate, deliberate choice. A stdio server needs no such flag."
+        });
+      }
+      if (hits.length === 0) return null;
+      const details = [...new Set(hits.map((h) => h.detail))];
+      const shown = details.slice(0, 10);
+      const detail = details.length > shown.length ? `${shown.join(" ")} \u2026and ${details.length - shown.length} further module(s).` : shown.join(" ");
+      return {
+        ruleId: "MCP011",
+        title: "Go MCP SDK not serving the 2026-07-28 revision",
+        severity: "warning",
+        detail,
+        fix: [...new Set(hits.map((h) => h.fix))].join(" "),
+        specRef: SPEC.sdk,
+        references: [SPEC.goSdk, SPEC.markThreeLabsMcpGo],
+        location: hits[0].location
+      };
+    }
+  },
   // ---- Observations (MCP1xx) ----------------------------------------------
   // These carry `info` severity, which costs no points. They exist because a
   // report that cannot distinguish "still accepts legacy" from "only accepts
@@ -379,6 +528,7 @@ function gradeFrom(findings) {
   return { score, letter };
 }
 function evaluate(ctx) {
+  resetGoScope();
   const order = ["critical", "warning", "info"];
   return rules.map((r) => r.evaluate(ctx)).filter((f) => f !== null).sort((a, b) => order.indexOf(a.severity) - order.indexOf(b.severity));
 }
@@ -653,7 +803,7 @@ function advertisedMetadataUrl(header) {
 }
 
 // packages/core/src/scan.ts
-import { promises as fs } from "node:fs";
+import { constants, promises as fs } from "node:fs";
 import path from "node:path";
 var SCANNABLE = /* @__PURE__ */ new Set([".ts", ".tsx", ".js", ".mjs", ".cjs", ".py", ".go", ".rs"]);
 var IGNORED_DIRS = /* @__PURE__ */ new Set([
@@ -677,7 +827,13 @@ var IGNORED_DIRS = /* @__PURE__ */ new Set([
   // Rust build and vendoring directories.
   "target",
   ".cargo",
-  "vendor"
+  // Go vendoring lives here too, and a vendored tree contains the SDK's own
+  // source — scanning it reports the SDK's compatibility code as the project's.
+  "vendor",
+  // Go module and build caches, when someone points GOPATH/GOMODCACHE inside
+  // the repository. Same reasoning as `.venv`.
+  ".gocache",
+  ".gomodcache"
 ]);
 var SIGNAL_PATTERNS = {
   initialize: /InitializeRequest|oninitialized|on_initialized|notifications\/initialized|["']initialize["']|["']initialized["']/,
@@ -697,39 +853,132 @@ var SIGNAL_PATTERNS = {
    * well-maintained ones — without something to weigh against `initialize`,
    * every dual-era codebase grades as if it had never migrated.
    *
-   * Deliberately narrow: the `io.modelcontextprotocol/` prefix and
-   * `server/discover` only exist in `2026-07-28`, so a match is hard evidence.
-   * A dependency on the v2 SDK packages counts too — that line has no legacy
-   * mode to be confused with.
+   * Deliberately narrow, and it must stay that way. The four `_meta` keys are
+   * ENUMERATED rather than matched by prefix, and the difference is load
+   * bearing: the *legacy* mark3labs SDK (mcp-go v0.58.0, `mcp/tasks.go`)
+   * already defines `io.modelcontextprotocol/related-task`. Loosening this to
+   * the bare prefix would read a legacy Go server as modern and silence MCP001
+   * on it. A dependency on the v2 npm packages counts too — that line has no
+   * legacy mode to be confused with.
+   *
+   * Note what is deliberately NOT here: the literal date `"2026-07-28"`. It was
+   * added for Go and removed again, because quoting is not what separates
+   * evidence from mention. A comment reading `we do not support "2026-07-28"
+   * yet`, or a test asserting a server negotiates *down* from it, both matched
+   * — and silenced MCP001 and MCP002 on genuinely legacy servers in every
+   * language. Go's evidence comes from `go.mod` instead; see `scanSource`.
    */
   modernEra: /io\.modelcontextprotocol\/(protocolVersion|clientCapabilities|clientInfo|serverInfo)|["']server\/discover["']|@modelcontextprotocol\/(server|client|core)\b|\bfrom\s+mcp\.server\s+import\s+[^#\n]*\bMCPServer\b|\bfrom\s+mcp\.server\.mcpserver(?:\.[A-Za-z_][\w.]*)?\s+import\b/
 };
+var GO_SIGNAL_PATTERNS = {
+  initialize: /\b\w+\.Initialized?(?:Params|Request|Result)\b|\.InitializeParams\s*\(\)|\.(?:Add|On)(?:Before|After)Initialize\b|\bInitializedHandler\s*:/,
+  sessionId: /\bGetSessionID\s*[:=]|\bserver\.WithSessionIdManager(?:Resolver)?\s*\(/,
+  // `server.WithLogging()` takes NO arguments in mcp-go, and the empty parens
+  // are what separates it from every other Go middleware library's
+  // `server.WithLogging(logger)` — `server` being the most common variable name
+  // in Go for an HTTP server, that distinction is the whole guard.
+  logging: /\b\w+\.LoggingMessageParams\b|\b\w+\.NewLoggingHandler\s*\(|\bserver\.WithLogging\s*\(\s*\)|\.SendLogMessageToClient\s*\(/,
+  sampling: /\b\w+\.CreateMessage(?:Params|Result|Request)\b|\bCreateMessageHandler\s*:|\.(?:EnableSampling|RequestSampling)\s*\(|\bclient\.WithSamplingHandler\s*\(/,
+  // The bare `.AddRoots(` / `.RemoveRoots(` family is deliberately gone: it
+  // accepted any receiver at all, and convicted a Go LSP server whose
+  // workspace type has exactly those methods. `WithRoots()` is zero-argument in
+  // mcp-go, same reasoning as WithLogging above.
+  roots: /\b\w+\.ListRoots(?:Params|Result)\b|\bserver\.WithRoots\s*\(\s*\)|\bclient\.WithRootsHandler\s*\(/,
+  modernEra: /\b\w+\.MetaKey(?:ProtocolVersion|ClientInfo|ServerInfo|ClientCapabilities|SubscriptionID)\b|\b\w+\.ProtocolVersion20260728\b|\b\w+\.Discover(?:Params|Result)\b|["']subscriptions\/listen["']/
+};
+var GO_TRANSPORT_PATTERNS = {
+  // Package-qualified: an earlier form matched any identifier ending in
+  // `StreamableHTTPServer`, so an unrelated module declaring `type
+  // StreamableHTTPServer struct{}` was enough to convict the module beside it.
+  goStreamableHttp: /\b\w+\.(?:NewStreamableHTTPHandler|NewStreamableHTTPServer|StreamableHTTPOptions|StreamableHTTPHandler|StreamableServerTransport)\b/,
+  // `WithStateLess` takes a bool, so the argument has to be read: passing
+  // `false` is an explicit declaration of statefulness, not an opt-in.
+  goStatelessOptIn: /\bStateless\s*:\s*true\b|\.Stateless\s*=\s*true\b|\bWithStateLess\s*\(\s*true\s*\)|\bStatelessSessionIdManager\b/
+};
+function stripGoLineComment(line, state) {
+  let { inRawString, inBlockComment } = state;
+  let quote = inRawString ? "`" : null;
+  let code = "";
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (inBlockComment) {
+      if (ch === "*" && line[i + 1] === "/") {
+        inBlockComment = false;
+        i++;
+      }
+      continue;
+    }
+    if (quote) {
+      if (ch === "\\" && quote !== "`") i++;
+      else if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === "/" && line[i + 1] === "/") break;
+    if (ch === "/" && line[i + 1] === "*") {
+      inBlockComment = true;
+      i++;
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === "`") {
+      quote = ch;
+      code += ch;
+      continue;
+    }
+    code += ch;
+  }
+  return { code, state: { inRawString: quote === "`", inBlockComment } };
+}
 async function scanSource(dir, opts = {}) {
   const maxFiles = opts.maxFiles ?? 5e3;
   const maxBytes = opts.maxBytesPerFile ?? 1e6;
+  const MAX_MATCHES_PER_SIGNAL = 500;
   const matches = {};
+  const transportDirs = {};
   for (const key of Object.keys(SIGNAL_PATTERNS)) matches[key] = [];
+  for (const key of Object.keys(GO_SIGNAL_PATTERNS)) matches[key] ??= [];
+  for (const key of Object.keys(GO_TRANSPORT_PATTERNS)) matches[key] ??= [];
   let filesScanned = 0;
   const files = await collectFiles(dir, maxFiles);
   for (const file of files) {
     const content = await readIfSmallEnough(file, maxBytes);
     if (content === null) continue;
     filesScanned++;
+    const relative = path.relative(dir, file).split(path.sep).join("/");
+    const isGo = path.extname(file) === ".go";
+    const isGoTest = isGo && file.endsWith("_test.go");
+    const applicable = [SIGNAL_PATTERNS];
+    if (isGo) applicable.push(GO_SIGNAL_PATTERNS);
+    let lex = { inRawString: false, inBlockComment: false };
     const lines = content.split(/\r?\n/);
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
-      for (const [signal, re] of Object.entries(SIGNAL_PATTERNS)) {
-        if (re.test(line)) {
-          matches[signal].push({
-            file: path.relative(dir, file),
-            line: i + 1,
-            text: line.trim().slice(0, 200)
-          });
+      const record = (signal) => {
+        if (matches[signal].length >= MAX_MATCHES_PER_SIGNAL) return;
+        matches[signal].push({
+          file: relative,
+          line: i + 1,
+          text: line.trim().slice(0, 200)
+        });
+      };
+      for (const patterns of applicable) {
+        for (const [signal, re] of Object.entries(patterns)) {
+          if (re.test(line)) record(signal);
         }
+      }
+      if (!isGo || isGoTest) continue;
+      const stripped = stripGoLineComment(line, lex);
+      lex = stripped.state;
+      for (const [signal, re] of Object.entries(GO_TRANSPORT_PATTERNS)) {
+        if (!re.test(stripped.code)) continue;
+        const dir2 = relative.includes("/") ? relative.slice(0, relative.lastIndexOf("/") + 1) : "";
+        const seen = transportDirs[signal] ??= /* @__PURE__ */ new Set();
+        if (seen.has(dir2)) continue;
+        seen.add(dir2);
+        matches[signal].push({ file: relative, line: i + 1, text: line.trim().slice(0, 200) });
       }
     }
   }
-  const pkg = await readPackageJson(dir);
+  const pkg = await readPackageJson(dir, maxBytes);
   for (const name of pkg.modernPackages) {
     matches.modernEra.push({ file: "package.json", line: 0, text: name });
   }
@@ -742,7 +991,25 @@ async function scanSource(dir, opts = {}) {
       text: req.requirement
     });
   }
-  return { matches, sdkVersion: pkg.sdkVersion, pythonSdkRequirements, filesScanned, sdkDependencies: await readCargoDependencies(dir) };
+  const go = await readGoModDependencies(dir, maxBytes, maxFiles);
+  const sdkDependencies = [...await readCargoDependencies(dir, maxBytes), ...go.deps];
+  for (const dep of sdkDependencies) {
+    if (dep.ecosystem !== "go" || dep.sdkLine !== "modern") continue;
+    if (dep.indirect || dep.replaced) continue;
+    matches.modernEra.push({
+      file: dep.manifest,
+      line: dep.line ?? 0,
+      text: `${dep.name} ${dep.constraint}`
+    });
+  }
+  return {
+    matches,
+    sdkVersion: pkg.sdkVersion,
+    pythonSdkRequirements,
+    filesScanned,
+    sdkDependencies,
+    goManifests: go.manifests
+  };
 }
 function classifyPythonSdkSpecifier(specifier) {
   const value = specifier.trim().replace(/^(["'])(.*)\1$/, "$2").trim();
@@ -913,7 +1180,7 @@ function hasTomlArrayClose(line) {
   return false;
 }
 async function readPythonSdkRequirements(dir, maxBytes, maxFiles) {
-  const manifests = await collectPythonDependencyFiles(dir, maxFiles);
+  const manifests = await collectMatchingFiles(dir, isPythonDependencyFile, maxFiles);
   const found = [];
   for (const manifest of manifests) {
     const content = await readIfSmallEnough(manifest, maxBytes);
@@ -932,9 +1199,10 @@ var MODERN_PACKAGES = [
   "@modelcontextprotocol/client",
   "@modelcontextprotocol/core"
 ];
-async function readPackageJson(dir) {
+async function readPackageJson(dir, maxBytes) {
   try {
-    const raw = await fs.readFile(path.join(dir, "package.json"), "utf8");
+    const raw = await readIfSmallEnough(path.join(dir, "package.json"), maxBytes);
+    if (raw === null) return { sdkVersion: null, modernPackages: [] };
     const pkg = JSON.parse(raw);
     const deps = { ...pkg.devDependencies, ...pkg.dependencies };
     const dep = deps["@modelcontextprotocol/sdk"];
@@ -1036,19 +1304,224 @@ function parseCargoToml(content) {
   closeSubTable();
   return deps;
 }
-async function readCargoDependencies(dir) {
-  try {
-    const raw = await fs.readFile(path.join(dir, "Cargo.toml"), "utf8");
-    return parseCargoToml(raw);
-  } catch {
-    return [];
-  }
+async function readCargoDependencies(dir, maxBytes) {
+  const raw = await readIfSmallEnough(path.join(dir, "Cargo.toml"), maxBytes);
+  return raw === null ? [] : parseCargoToml(raw);
 }
+var MCP_GO_MODULES = {
+  "github.com/modelcontextprotocol/go-sdk": [1, 7, 0],
+  "github.com/mark3labs/mcp-go": [1, 0, 0]
+};
+var GO_PSEUDO_VERSION = /[-.]\d{14}-[0-9a-f]{12}$/;
+function classifyGoSdkVersion(module, version) {
+  if (!Object.hasOwn(MCP_GO_MODULES, module)) return "unknown";
+  const threshold = MCP_GO_MODULES[module];
+  const raw = version.trim();
+  if (!raw || raw.endsWith("+incompatible") || GO_PSEUDO_VERSION.test(raw)) return "unknown";
+  const parsed = raw.match(/^v(\d+)\.(\d+)\.(\d+)(?:-[0-9A-Za-z.-]+)?$/);
+  if (!parsed) return "unknown";
+  const triple = [Number(parsed[1]), Number(parsed[2]), Number(parsed[3])];
+  for (let i = 0; i < 3; i++) {
+    if (triple[i] !== threshold[i]) return triple[i] < threshold[i] ? "legacy" : "modern";
+  }
+  return "modern";
+}
+function stripGoComment(line) {
+  const at = line.indexOf("//");
+  if (at === -1) return { text: line.trim(), indirect: false };
+  const first = line.slice(at + 2).trim().split(/\s+/)[0];
+  return {
+    text: line.slice(0, at).trim(),
+    indirect: first === "indirect" || first === "indirect;"
+  };
+}
+function parseGoWork(content) {
+  const uses = [];
+  const replacements = /* @__PURE__ */ new Map();
+  const unquote = (token) => token.replace(/^"(.*)"$/, "$1");
+  let block = null;
+  const noteUse = (text) => {
+    const trimmed = text.trim();
+    const quoted = trimmed.match(/^"([^"]*)"/);
+    const value = quoted ? quoted[1] : trimmed.split(/\s+/)[0] ?? "";
+    if (value) uses.push(value);
+  };
+  const noteReplace = (text) => {
+    const module = unquote(text.split(/\s+/)[0] ?? "");
+    if (!module) return;
+    const arrow = text.indexOf("=>");
+    if (arrow !== -1) {
+      const rhs = text.slice(arrow + 2).trim().split(/\s+/).map(unquote);
+      if (rhs.length === 2 && /^v\d/.test(rhs[1])) {
+        replacements.set(module, { name: rhs[0], version: rhs[1] });
+        return;
+      }
+    }
+    replacements.set(module, null);
+  };
+  for (const raw of content.split(/\r?\n/)) {
+    const { text } = stripGoComment(raw);
+    if (!text) continue;
+    if (block) {
+      if (text === ")") block = null;
+      else if (block === "use") noteUse(text);
+      else noteReplace(text);
+      continue;
+    }
+    const opened = text.match(/^(use|replace)\s*\($/);
+    if (opened) {
+      block = opened[1];
+      continue;
+    }
+    const single = text.match(/^(use|replace)\s+(.*)$/);
+    if (!single) continue;
+    if (single[1] === "use") noteUse(single[2]);
+    else noteReplace(single[2].trim());
+  }
+  return { uses, replacements };
+}
+function applyReplacement(dep, to) {
+  if (to.name === dep.name) {
+    dep.constraint = to.version;
+    dep.sdkLine = classifyGoSdkVersion(to.name, to.version);
+    return;
+  }
+  dep.replaced = true;
+  dep.sdkLine = "unknown";
+}
+function parseGoMod(content) {
+  const lines = content.split(/\r?\n/);
+  const deps = [];
+  const replaced = /* @__PURE__ */ new Set();
+  const replacements = /* @__PURE__ */ new Map();
+  let block = null;
+  const noteReplace = (text) => {
+    const unquote = (token) => token.replace(/^"(.*)"$/, "$1");
+    const module = unquote(text.split(/\s+/)[0] ?? "");
+    if (!module) return;
+    const arrow = text.indexOf("=>");
+    if (arrow !== -1) {
+      const rhs = text.slice(arrow + 2).trim().split(/\s+/).map(unquote);
+      if (rhs.length === 2 && /^v\d/.test(rhs[1])) {
+        replacements.set(module, { name: rhs[0], version: rhs[1] });
+        return;
+      }
+    }
+    replaced.add(module);
+  };
+  const noteRequire = (text, lineNo, indirect) => {
+    const entry = text.match(/^(\S+)\s+(\S+)$/);
+    if (!entry) return;
+    const unquote = (token) => token.replace(/^"(.*)"$/, "$1");
+    const name = unquote(entry[1]);
+    const constraint = unquote(entry[2]);
+    if (!Object.hasOwn(MCP_GO_MODULES, name)) return;
+    deps.push({
+      ecosystem: "go",
+      name,
+      constraint,
+      manifest: "go.mod",
+      line: lineNo,
+      sdkLine: classifyGoSdkVersion(name, constraint),
+      ...indirect ? { indirect: true } : {}
+    });
+  };
+  for (let i = 0; i < lines.length; i++) {
+    const { text, indirect } = stripGoComment(lines[i]);
+    if (!text) continue;
+    if (block) {
+      if (text === ")") {
+        block = null;
+      } else if (block === "require") {
+        noteRequire(text, i + 1, indirect);
+      } else if (block === "replace") {
+        noteReplace(text);
+      }
+      continue;
+    }
+    const opened = text.match(/^(require|replace|exclude|retract)\s*\($/);
+    if (opened) {
+      block = opened[1];
+      continue;
+    }
+    const single = text.match(/^(require|replace|exclude|retract)\s+(.*)$/);
+    if (!single) continue;
+    if (single[1] === "require") noteRequire(single[2].trim(), i + 1, indirect);
+    else if (single[1] === "replace") noteReplace(single[2].trim());
+  }
+  for (const dep of deps) {
+    const to = replacements.get(dep.name);
+    if (to) {
+      applyReplacement(dep, to);
+      continue;
+    }
+    if (!replaced.has(dep.name)) continue;
+    dep.replaced = true;
+    dep.sdkLine = "unknown";
+  }
+  return deps;
+}
+async function readGoModDependencies(dir, maxBytes, maxFiles) {
+  const files = await collectMatchingFiles(dir, (name) => name === "go.mod", maxFiles);
+  const workFiles = await collectMatchingFiles(dir, (name) => name === "go.work", maxFiles);
+  const governed = /* @__PURE__ */ new Map();
+  for (const workFile of workFiles) {
+    const content = await readIfSmallEnough(workFile, maxBytes);
+    if (content === null) continue;
+    const work = parseGoWork(content);
+    if (work.replacements.size === 0) continue;
+    const workDir = path.dirname(workFile);
+    for (const use of work.uses) {
+      const useDir = path.resolve(workDir, use);
+      if (path.relative(workDir, useDir).startsWith("..")) continue;
+      const manifest = path.relative(dir, path.join(useDir, "go.mod")).split(path.sep).join("/");
+      if (manifest.startsWith("../")) continue;
+      const existing = governed.get(manifest);
+      if (!existing) {
+        governed.set(manifest, new Map(work.replacements));
+        continue;
+      }
+      for (const [module, replacement] of work.replacements) {
+        if (!existing.has(module)) {
+          existing.set(module, replacement);
+          continue;
+        }
+        const prior = existing.get(module);
+        const same = prior === replacement || prior != null && replacement != null && prior.name === replacement.name && prior.version === replacement.version;
+        if (!same) existing.set(module, null);
+      }
+    }
+  }
+  const deps = [];
+  const manifests = [];
+  for (const file of files) {
+    const content = await readIfSmallEnough(file, maxBytes);
+    if (content === null) continue;
+    const relative = path.relative(dir, file).split(path.sep).join("/");
+    manifests.push(relative);
+    const workspace = governed.get(relative);
+    for (const dep of parseGoMod(content)) {
+      const scoped = { ...dep, manifest: relative };
+      if (workspace?.has(dep.name)) {
+        const to = workspace.get(dep.name);
+        if (to) applyReplacement(scoped, to);
+        else {
+          scoped.replaced = true;
+          scoped.sdkLine = "unknown";
+        }
+      }
+      deps.push(scoped);
+    }
+  }
+  return { deps, manifests };
+}
+var SAFE_READ_FLAGS = constants.O_RDONLY | (typeof constants.O_NOFOLLOW === "number" ? constants.O_NOFOLLOW : 0) | (typeof constants.O_NONBLOCK === "number" ? constants.O_NONBLOCK : 0);
 async function readIfSmallEnough(file, maxBytes) {
   let handle;
   try {
-    handle = await fs.open(file, "r");
+    handle = await fs.open(file, SAFE_READ_FLAGS);
     const stat = await handle.stat();
+    if (!stat.isFile()) return null;
     if (stat.size > maxBytes) return null;
     return await handle.readFile("utf8");
   } catch {
@@ -1074,7 +1547,7 @@ async function collectFiles(dir, cap) {
       if (e.isDirectory()) {
         if (IGNORED_DIRS.has(e.name)) continue;
         await walk(full);
-      } else if (SCANNABLE.has(path.extname(e.name))) {
+      } else if (e.isFile() && SCANNABLE.has(path.extname(e.name))) {
         out.push(full);
       }
     }
@@ -1082,7 +1555,7 @@ async function collectFiles(dir, cap) {
   await walk(dir);
   return out;
 }
-async function collectPythonDependencyFiles(dir, cap) {
+async function collectMatchingFiles(dir, match, cap) {
   const out = [];
   async function walk(current) {
     if (out.length >= cap) return;
@@ -1098,7 +1571,7 @@ async function collectPythonDependencyFiles(dir, cap) {
       if (entry.isDirectory()) {
         if (IGNORED_DIRS.has(entry.name)) continue;
         await walk(full);
-      } else if (isPythonDependencyFile(entry.name)) {
+      } else if (entry.isFile() && match(entry.name)) {
         out.push(full);
       }
     }

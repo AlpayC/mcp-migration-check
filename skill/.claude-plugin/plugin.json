@@ -1,6 +1,6 @@
 {
   "name": "mcp-migration",
-  "version": "0.5.2",
+  "version": "0.6.0",
   "description": "Diagnose and carry out the migration of an MCP server to the 2026-07-28 specification. Runs a deterministic rule engine over the code, then walks the remediation per finding: stateless transport, OAuth 2.1, the deprecated capabilities, and the SDK v2 rename.",
   "author": {
     "name": "AlpayC",
@@ -21,7 +21,8 @@
     "oauth",
     "typescript",
     "python",
-    "rust"
+    "rust",
+    "go"
   ],
   "skills": "./"
 }
