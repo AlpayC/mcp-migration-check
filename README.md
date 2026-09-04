@@ -66,8 +66,8 @@ a dependency check against the manifest that pins its SDK:
 | **Go**                      | `go.mod`                                                    | **MCP011** |
 | C#                          | —                                                           | none yet   |
 
-Every language above is also grepped for the protocol signals behind
-MCP001–MCP005, which are language-neutral. **C# is not scanned at all** — the
+Every language with a rule above is also grepped for the protocol signals
+behind MCP001–MCP005, which are language-neutral. **C# is not scanned at all** — the
 scanner does not read `.cs` files and there is no C# SDK rule, so a source scan
 of a C# server reports nothing and that clean result means nothing. That SDK
 moved to a 2.x major of the `ModelContextProtocol` packages, so the TypeScript
@@ -288,7 +288,9 @@ the absence of the modern surface is a defect.
   local path), a pseudo-version such as `v1.6.2-0.20260801000000-abcdef123456`
   (which names a commit, not a release), a `+incompatible` tag, and one marked
   `// indirect` (which the toolchain maintains to mean nothing here imports it).
-  `go.work` is not read at all. A clean MCP011 result
+  `go.work` is read for `replace` directives only — a workspace replacement
+  overrides the module-level one, so ignoring it reported versions the build
+  never resolves — but not for anything else. A clean MCP011 result
   therefore means no *classifiable* requirement is behind — a workspace or a
   replaced module can still be.
 - **MCP011's second case argues from absence.** A modern `go-sdk` serving
@@ -389,7 +391,7 @@ scripts/ecosystem-report.mjs registry-wide readiness snapshot
 ```
 
 ```bash
-npm test              # node --test via tsx; 110 assertions, no network
+npm test              # node --test via tsx; 213 assertions, no network
 npm run typecheck
 npm run build:bundles # regenerate both copies of the engine; CI fails if stale
 ```

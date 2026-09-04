@@ -194,24 +194,39 @@ function owningGoManifest(ctx: RuleContext, file: string): string | null {
  * prove a server works, but finding the modern machinery is enough to stop
  * calling the legacy path a defect — which is the failure this guards against.
  */
+function isGoPath(file: string): boolean {
+  return file.endsWith(".go") || file.endsWith("go.mod");
+}
+
 function servesModern(ctx: RuleContext, forFile?: string): boolean {
   if (ctx.live && (ctx.live.era === "modern" || ctx.live.era === "dual")) return true;
   const evidence = ctx.source?.matches.modernEra ?? [];
   if (evidence.length === 0) return false;
-  if (!forFile) return evidence.length > 0;
+  if (!forFile) return true;
 
-  // Evidence read from a `go.mod` speaks for that module and no other. A
+  // Go evidence speaks for the module it came from, and for nothing else. A
   // monorepo that migrated one module had otherwise acquitted every module
-  // beside it: dropping this repository's own `go-notes-mcp` fixture next to a
-  // single migrated `go.mod` silenced both of its criticals, 60 points, with
-  // nothing in CI pinning the direction of the over-reach.
+  // beside it: this repository's own `go-notes-mcp` fixture, dropped next to a
+  // single migrated `go.mod`, lost both of its criticals — 60 points.
   //
-  // Evidence from any other source — the npm v2 packages, a modern Python
-  // constraint, a literal in the source — is repository-wide as it always was.
-  const owner = owningGoManifest(ctx, forFile);
+  // Two boundaries, and the first is the one that bites hardest. A Go SDK
+  // version says nothing whatsoever about a Python or TypeScript server, yet
+  // `dirOf("go.mod")` is `""` and every path starts with `""` — so a Go module
+  // at the repository root "owned" `server.py` and `index.ts` too, and a
+  // polyglot repo with a Go tooling module acquitted its Python MCP server.
+  // Non-Go evidence — the npm v2 packages, a modern Python constraint — stays
+  // repository-wide as it always was.
+  //
+  // A `.go` file that sits above every `go.mod` belongs to no module, and no
+  // module's state can be inferred about it either way; it falls back to the
+  // repository-wide answer rather than being denied evidence that exists.
+  const scoped = isGoPath(forFile);
+  const owner = scoped ? owningGoManifest(ctx, forFile) : null;
   return evidence.some((match) => {
-    if (!match.file.endsWith("go.mod")) return true;
-    return owner !== null && match.file === owner;
+    if (!isGoPath(match.file)) return true;
+    if (!scoped) return false;
+    if (owner === null) return true;
+    return owningGoManifest(ctx, match.file) === owner;
   });
 }
 
@@ -235,22 +250,28 @@ export const rules: Rule[] = [
     severity: "critical",
     specRef: SPEC.versioning,
     evaluate(ctx): Finding | null {
-      const legacySignal =
-        firstMatch(ctx, "initialize") ??
-        firstMatch(ctx, "pythonV1Sdk") ??
-        firstMatch(ctx, "pythonServerSdk");
-      if (servesModern(ctx, legacySignal?.file)) return null;
+      // The first match is not the right one to ask about — the first
+      // *unacquitted* one is. Scoping the check to whichever match happened to
+      // sort first made the verdict depend on directory names: with a modern
+      // module named `a-modern` beside a legacy `z-legacy`, the modern
+      // module's own dual-era `InitializedHandler:` was selected, found
+      // acquitted, and the whole repository returned clean. Renaming the two
+      // directories reversed the result on byte-identical files.
+      const unacquitted = (signal: string): SourceMatch | undefined =>
+        ctx.source?.matches[signal]?.find((m) => !servesModern(ctx, m.file));
 
       const live = ctx.live?.respondsToLegacyInitialize;
-      const v1PythonApi = firstMatch(ctx, "pythonV1Sdk");
+      if (live && servesModern(ctx)) return null;
+
+      const v1PythonApi = unacquitted("pythonV1Sdk");
       const v1PythonRequirement = ctx.source?.pythonSdkRequirements?.some(
         (candidate) => candidate.sdkLine === "legacy",
       );
       const constrainedPythonServer = v1PythonRequirement
-        ? firstMatch(ctx, "pythonServerSdk")
+        ? unacquitted("pythonServerSdk")
         : undefined;
       const legacyPythonServer = v1PythonApi ?? constrainedPythonServer;
-      const src = firstMatch(ctx, "initialize") ?? legacyPythonServer;
+      const src = unacquitted("initialize") ?? legacyPythonServer;
       if (!live && !src) return null;
 
       const negotiated = ctx.live?.legacyProtocolVersion;
@@ -290,11 +311,9 @@ export const rules: Rule[] = [
       // Source: a session-id reference is a hazard only if this is not already
       // a dual-era server. If the modern path is there, the session machinery
       // belongs to the legacy path and static analysis cannot say more.
-      const candidate = firstMatch(ctx, "sessionId");
-      const src =
-        candidate && !servesModern(ctx, candidate.file) && !goSdkUnclassifiable(ctx, candidate)
-          ? candidate
-          : undefined;
+      const src = ctx.source?.matches.sessionId?.find(
+        (m) => !servesModern(ctx, m.file) && !goSdkUnclassifiable(ctx, m),
+      );
       if (!live && !src) return null;
 
       return {
@@ -561,7 +580,12 @@ export const rules: Rule[] = [
         // toolchain asserts nothing here imports it — and a `replace`d one
         // describes something the build does not use. Both are `unknown`, and
         // `unknown` is reported by nothing.
-        if (dep.indirect || dep.replaced || dep.sdkLine === "unknown") continue;
+        // `replaced` alone is not a reason to skip. A replacement that names a
+        // module and a version is perfectly readable, and `sdkLine` already
+        // carries the verdict — an unreadable one is `unknown`. Skipping on the
+        // flag let `replace X => X v1.6.1`, which changes nothing about the
+        // build, clear the finding off a genuinely legacy server.
+        if (dep.indirect || dep.sdkLine === "unknown") continue;
 
         if (dep.sdkLine === "legacy") {
           const target =
@@ -595,7 +619,7 @@ export const rules: Rule[] = [
       // and only when the opt-in appears nowhere in it.
       for (const dep of deps) {
         if (dep.name !== "github.com/modelcontextprotocol/go-sdk") continue;
-        if (dep.sdkLine !== "modern" || dep.indirect || dep.replaced) continue;
+        if (dep.sdkLine !== "modern" || dep.indirect) continue;
 
         const owned = ownedBy(ctx, dep.manifest);
         const http = ctx.source?.matches.goStreamableHttp?.find(owned);

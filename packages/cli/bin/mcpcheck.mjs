@@ -98,15 +98,21 @@ function owningGoManifest(ctx, file) {
   }
   return best;
 }
+function isGoPath(file) {
+  return file.endsWith(".go") || file.endsWith("go.mod");
+}
 function servesModern(ctx, forFile) {
   if (ctx.live && (ctx.live.era === "modern" || ctx.live.era === "dual")) return true;
   const evidence = ctx.source?.matches.modernEra ?? [];
   if (evidence.length === 0) return false;
-  if (!forFile) return evidence.length > 0;
-  const owner = owningGoManifest(ctx, forFile);
+  if (!forFile) return true;
+  const scoped = isGoPath(forFile);
+  const owner = scoped ? owningGoManifest(ctx, forFile) : null;
   return evidence.some((match) => {
-    if (!match.file.endsWith("go.mod")) return true;
-    return owner !== null && match.file === owner;
+    if (!isGoPath(match.file)) return true;
+    if (!scoped) return false;
+    if (owner === null) return true;
+    return owningGoManifest(ctx, match.file) === owner;
   });
 }
 function versionsClause(ctx) {
@@ -120,16 +126,16 @@ var rules = [
     severity: "critical",
     specRef: SPEC.versioning,
     evaluate(ctx) {
-      const legacySignal = firstMatch(ctx, "initialize") ?? firstMatch(ctx, "pythonV1Sdk") ?? firstMatch(ctx, "pythonServerSdk");
-      if (servesModern(ctx, legacySignal?.file)) return null;
+      const unacquitted = (signal) => ctx.source?.matches[signal]?.find((m) => !servesModern(ctx, m.file));
       const live = ctx.live?.respondsToLegacyInitialize;
-      const v1PythonApi = firstMatch(ctx, "pythonV1Sdk");
+      if (live && servesModern(ctx)) return null;
+      const v1PythonApi = unacquitted("pythonV1Sdk");
       const v1PythonRequirement = ctx.source?.pythonSdkRequirements?.some(
         (candidate) => candidate.sdkLine === "legacy"
       );
-      const constrainedPythonServer = v1PythonRequirement ? firstMatch(ctx, "pythonServerSdk") : void 0;
+      const constrainedPythonServer = v1PythonRequirement ? unacquitted("pythonServerSdk") : void 0;
       const legacyPythonServer = v1PythonApi ?? constrainedPythonServer;
-      const src = firstMatch(ctx, "initialize") ?? legacyPythonServer;
+      const src = unacquitted("initialize") ?? legacyPythonServer;
       if (!live && !src) return null;
       const negotiated = ctx.live?.legacyProtocolVersion;
       return {
@@ -150,8 +156,9 @@ var rules = [
     specRef: SPEC.transport,
     evaluate(ctx) {
       const live = ctx.live?.sessionIdOnModernRequest;
-      const candidate = firstMatch(ctx, "sessionId");
-      const src = candidate && !servesModern(ctx, candidate.file) && !goSdkUnclassifiable(ctx, candidate) ? candidate : void 0;
+      const src = ctx.source?.matches.sessionId?.find(
+        (m) => !servesModern(ctx, m.file) && !goSdkUnclassifiable(ctx, m)
+      );
       if (!live && !src) return null;
       return {
         ruleId: "MCP002",
@@ -372,7 +379,7 @@ var rules = [
       if (deps.length === 0) return null;
       const hits = [];
       for (const dep of deps) {
-        if (dep.indirect || dep.replaced || dep.sdkLine === "unknown") continue;
+        if (dep.indirect || dep.sdkLine === "unknown") continue;
         if (dep.sdkLine === "legacy") {
           const target = dep.name === "github.com/mark3labs/mcp-go" ? "v1.0.0" : "v1.7.0";
           hits.push({
@@ -384,7 +391,7 @@ var rules = [
       }
       for (const dep of deps) {
         if (dep.name !== "github.com/modelcontextprotocol/go-sdk") continue;
-        if (dep.sdkLine !== "modern" || dep.indirect || dep.replaced) continue;
+        if (dep.sdkLine !== "modern" || dep.indirect) continue;
         const owned = ownedBy(ctx, dep.manifest);
         const http = ctx.source?.matches.goStreamableHttp?.find(owned);
         if (!http) continue;
@@ -854,8 +861,8 @@ var GO_TRANSPORT_PATTERNS = {
   // `false` is an explicit declaration of statefulness, not an opt-in.
   goStatelessOptIn: /\bStateless\s*:\s*true\b|\.Stateless\s*=\s*true\b|\bWithStateLess\s*\(\s*true\s*\)|\bStatelessSessionIdManager\b/
 };
-function stripGoLineComment(line) {
-  let quote = null;
+function stripGoLineComment(line, inRawString) {
+  let quote = inRawString ? "`" : null;
   for (let i = 0; i < line.length; i++) {
     const ch = line[i];
     if (quote) {
@@ -864,15 +871,18 @@ function stripGoLineComment(line) {
       continue;
     }
     if (ch === '"' || ch === "'" || ch === "`") quote = ch;
-    else if (ch === "/" && line[i + 1] === "/") return line.slice(0, i);
+    else if (ch === "/" && line[i + 1] === "/") {
+      return { code: line.slice(0, i), inRawString: false };
+    }
   }
-  return line;
+  return { code: quote === "`" ? "" : line, inRawString: quote === "`" };
 }
 async function scanSource(dir, opts = {}) {
   const maxFiles = opts.maxFiles ?? 5e3;
   const maxBytes = opts.maxBytesPerFile ?? 1e6;
   const MAX_MATCHES_PER_SIGNAL = 500;
   const matches = {};
+  const transportDirs = {};
   for (const key of Object.keys(SIGNAL_PATTERNS)) matches[key] = [];
   for (const key of Object.keys(GO_SIGNAL_PATTERNS)) matches[key] ??= [];
   for (const key of Object.keys(GO_TRANSPORT_PATTERNS)) matches[key] ??= [];
@@ -887,6 +897,7 @@ async function scanSource(dir, opts = {}) {
     const isGoTest = isGo && file.endsWith("_test.go");
     const applicable = [SIGNAL_PATTERNS];
     if (isGo) applicable.push(GO_SIGNAL_PATTERNS);
+    let inRawString = false;
     const lines = content.split(/\r?\n/);
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
@@ -904,9 +915,15 @@ async function scanSource(dir, opts = {}) {
         }
       }
       if (!isGo || isGoTest) continue;
-      const code = stripGoLineComment(line);
+      const stripped = stripGoLineComment(line, inRawString);
+      inRawString = stripped.inRawString;
       for (const [signal, re] of Object.entries(GO_TRANSPORT_PATTERNS)) {
-        if (re.test(code)) record(signal);
+        if (!re.test(stripped.code)) continue;
+        const dir2 = relative.includes("/") ? relative.slice(0, relative.lastIndexOf("/") + 1) : "";
+        const seen = transportDirs[signal] ??= /* @__PURE__ */ new Set();
+        if (seen.has(dir2)) continue;
+        seen.add(dir2);
+        matches[signal].push({ file: relative, line: i + 1, text: line.trim().slice(0, 200) });
       }
     }
   }
@@ -1267,14 +1284,45 @@ function stripGoComment(line) {
     indirect: first === "indirect" || first === "indirect;"
   };
 }
+function parseGoWorkReplacements(content) {
+  const replaced = [];
+  let inBlock = false;
+  for (const raw of content.split(/\r?\n/)) {
+    const { text } = stripGoComment(raw);
+    if (!text) continue;
+    if (inBlock) {
+      if (text === ")") inBlock = false;
+      else replaced.push(text.split(/\s+/)[0].replace(/^"(.*)"$/, "$1"));
+      continue;
+    }
+    if (/^replace\s*\($/.test(text)) {
+      inBlock = true;
+      continue;
+    }
+    const single = text.match(/^replace\s+(.*)$/);
+    if (single) replaced.push(single[1].trim().split(/\s+/)[0].replace(/^"(.*)"$/, "$1"));
+  }
+  return replaced.filter(Boolean);
+}
 function parseGoMod(content) {
   const lines = content.split(/\r?\n/);
   const deps = [];
   const replaced = /* @__PURE__ */ new Set();
+  const replacements = /* @__PURE__ */ new Map();
   let block = null;
   const noteReplace = (text) => {
-    const module = text.split(/\s+/)[0]?.replace(/^"(.*)"$/, "$1");
-    if (module) replaced.add(module);
+    const unquote = (token) => token.replace(/^"(.*)"$/, "$1");
+    const module = unquote(text.split(/\s+/)[0] ?? "");
+    if (!module) return;
+    const arrow = text.indexOf("=>");
+    if (arrow !== -1) {
+      const rhs = text.slice(arrow + 2).trim().split(/\s+/).map(unquote);
+      if (rhs.length === 2 && /^v\d/.test(rhs[1])) {
+        replacements.set(module, { name: rhs[0], version: rhs[1] });
+        return;
+      }
+    }
+    replaced.add(module);
   };
   const noteRequire = (text, lineNo, indirect) => {
     const entry = text.match(/^(\S+)\s+(\S+)$/);
@@ -1317,6 +1365,13 @@ function parseGoMod(content) {
     else if (single[1] === "replace") noteReplace(single[2].trim());
   }
   for (const dep of deps) {
+    const to = replacements.get(dep.name);
+    if (to) {
+      dep.replaced = true;
+      dep.constraint = to.version;
+      dep.sdkLine = classifyGoSdkVersion(to.name, to.version);
+      continue;
+    }
     if (!replaced.has(dep.name)) continue;
     dep.replaced = true;
     dep.sdkLine = "unknown";
@@ -1325,6 +1380,12 @@ function parseGoMod(content) {
 }
 async function readGoModDependencies(dir, maxBytes, maxFiles) {
   const files = await collectMatchingFiles(dir, (name) => name === "go.mod", maxFiles);
+  const workFiles = await collectMatchingFiles(dir, (name) => name === "go.work", maxFiles);
+  const workReplaced = /* @__PURE__ */ new Set();
+  for (const workFile of workFiles) {
+    const content = await readIfSmallEnough(workFile, maxBytes);
+    if (content !== null) for (const m of parseGoWorkReplacements(content)) workReplaced.add(m);
+  }
   const deps = [];
   const manifests = [];
   for (const file of files) {
@@ -1332,7 +1393,10 @@ async function readGoModDependencies(dir, maxBytes, maxFiles) {
     if (content === null) continue;
     const relative = path.relative(dir, file).split(path.sep).join("/");
     manifests.push(relative);
-    for (const dep of parseGoMod(content)) deps.push({ ...dep, manifest: relative });
+    for (const dep of parseGoMod(content)) {
+      const overridden = workReplaced.has(dep.name) ? { replaced: true, sdkLine: "unknown" } : {};
+      deps.push({ ...dep, manifest: relative, ...overridden });
+    }
   }
   return { deps, manifests };
 }

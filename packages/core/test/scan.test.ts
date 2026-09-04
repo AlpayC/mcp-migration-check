@@ -11,6 +11,7 @@ import {
   classifyPythonSdkSpecifier,
   parseCargoToml,
   parseGoMod,
+  parseGoWorkReplacements,
   parsePythonSdkRequirements,
   scanSource,
 } from "../src/scan";
@@ -606,22 +607,25 @@ test("the Go streamable-HTTP signal matches the constructor, not just the option
 });
 
 test("the Go stateless opt-in signal matches both SDKs' spellings", async () => {
-  await withTempDir(async (dir) => {
-    await fs.writeFile(
-      path.join(dir, "main.go"),
-      [
-        "package main",
-        "",
-        "func main() {",
-        "\topts := &mcp.StreamableHTTPOptions{Stateless: true}",
-        "\tsrv := server.NewStreamableHTTPServer(s, server.WithStateLess(true))",
-        "\t_, _ = opts, srv",
-        "}",
-      ].join("\n"),
-    );
-    const result = await scanSource(dir);
-    assert.equal(result.matches.goStatelessOptIn.length, 2);
-  });
+  // One match per directory is deliberate — the signal is only ever consulted
+  // as "does any opt-in belong to module M" — so each spelling is checked in
+  // its own tree rather than expecting two hits from one file.
+  const spellings = [
+    "\topts := &mcp.StreamableHTTPOptions{Stateless: true}",
+    "\tsrv := server.NewStreamableHTTPServer(s, server.WithStateLess(true))",
+    "\th.Stateless = true",
+    "\tm := &server.StatelessSessionIdManager{}",
+  ];
+  for (const line of spellings) {
+    await withTempDir(async (dir) => {
+      await fs.writeFile(
+        path.join(dir, "main.go"),
+        ["package main", "", "func main() {", line, "}"].join("\n"),
+      );
+      const result = await scanSource(dir);
+      assert.equal(result.matches.goStatelessOptIn.length, 1, line.trim());
+    });
+  }
 });
 
 // ── what the Go signals must NOT do to other languages ──────────────────
@@ -855,4 +859,81 @@ test("scanSource reports every go.mod it saw, not only those with an MCP module"
     const r = await scanSource(dir);
     assert.deepEqual([...(r.goManifests ?? [])].sort(), ["go.mod", "sub/go.mod"]);
   });
+});
+
+test("a raw string spanning lines is not read as configuration", async () => {
+  // The scanner used to restart at each line boundary, so a server's own usage
+  // text — "--stateless  configure the transport with Stateless: true" inside a
+  // backtick string — acquitted the stateful server printing it.
+  await withTempDir(async (dir) => {
+    await fs.writeFile(
+      path.join(dir, "main.go"),
+      [
+        "package main",
+        "const usage = `notes-server",
+        "",
+        "Flags:",
+        "  --stateless   configure the transport with Stateless: true (unsupported)",
+        "`",
+        "func main() { _ = mcp.NewStreamableHTTPHandler(g, &mcp.StreamableHTTPOptions{}) }",
+      ].join("\n"),
+    );
+    const r = await scanSource(dir);
+    assert.deepEqual(r.matches.goStatelessOptIn, [], "help text is not an opt-in");
+    assert.equal(r.matches.goStreamableHttp.length, 1);
+  });
+});
+
+test("the transport signals keep one match per directory, not the first 500", async () => {
+  // A flat count cap made the verdict depend on directory names: with enough
+  // correctly configured modules ahead of it, a genuinely stateful module was
+  // never recorded at all.
+  await withTempDir(async (dir) => {
+    for (const name of ["aaa", "zzz"]) {
+      await fs.mkdir(path.join(dir, name), { recursive: true });
+      await fs.writeFile(
+        path.join(dir, name, "main.go"),
+        "package p\nfunc r() { _ = mcp.NewStreamableHTTPHandler(g, nil) }\nfunc s() { _ = mcp.StreamableHTTPOptions{} }\n",
+      );
+    }
+    const r = await scanSource(dir);
+    assert.deepEqual(
+      r.matches.goStreamableHttp.map((m) => m.file).sort(),
+      ["aaa/main.go", "zzz/main.go"],
+      "both directories represented, neither duplicated",
+    );
+  });
+});
+
+test("a replace that names a module and a version is readable, not opaque", () => {
+  // `replace X => X v1.6.1` changes nothing about the build, yet treating every
+  // replace as unreadable let one line clear both MCP011 and MCP002.
+  const selfRef = parseGoMod(
+    [`require ${GO_SDK} v1.6.1`, `replace ${GO_SDK} => ${GO_SDK} v1.6.1`].join("\n"),
+  );
+  assert.equal(selfRef[0].sdkLine, "legacy");
+  assert.equal(selfRef[0].replaced, true);
+
+  const upgrade = parseGoMod(
+    [`require ${GO_SDK} v1.6.1`, `replace ${GO_SDK} => ${GO_SDK} v1.7.0`].join("\n"),
+  );
+  assert.equal(upgrade[0].sdkLine, "modern", "the replacement is what builds");
+  assert.equal(upgrade[0].constraint, "v1.7.0");
+
+  const localPath = parseGoMod(
+    [`require ${GO_SDK} v1.6.1`, `replace ${GO_SDK} => ./forks/go-sdk`].join("\n"),
+  );
+  assert.equal(localPath[0].sdkLine, "unknown", "a local fork stays honestly unreadable");
+});
+
+test("parseGoWorkReplacements reads both directive forms", () => {
+  assert.deepEqual(
+    parseGoWorkReplacements(`go 1.25.0\nuse ./svc\nreplace ${GO_SDK} => ../fork\n`),
+    [GO_SDK],
+  );
+  assert.deepEqual(
+    parseGoWorkReplacements(`replace (\n\t${GO_SDK} => ../fork\n\tgithub.com/x/y => ../y\n)\n`),
+    [GO_SDK, "github.com/x/y"],
+  );
+  assert.deepEqual(parseGoWorkReplacements("go 1.25.0\nuse ./svc\n"), []);
 });

@@ -178,20 +178,32 @@ const GO_TRANSPORT_PATTERNS: Record<string, RegExp> = {
  * genuine defect the other way. Go has three string forms and all three can
  * carry a `//`.
  */
-function stripGoLineComment(line: string): string {
-  let quote: '"' | "'" | "`" | null = null;
+function stripGoLineComment(
+  line: string,
+  inRawString: boolean,
+): { code: string; inRawString: boolean } {
+  // A backtick string spans lines, so the scanner cannot start fresh on each
+  // one. Without the carried flag, a server's own `--stateless  configure the
+  // transport with Stateless: true` usage text was read as configuration and
+  // acquitted the stateful server printing it — the same failure as the
+  // `// TODO: set Stateless: true` comment, one string form further along.
+  let quote: '"' | "'" | "`" | null = inRawString ? "`" : null;
   for (let i = 0; i < line.length; i++) {
     const ch = line[i];
     if (quote) {
-      // Raw strings (backticks) have no escapes; the other two do.
+      // Raw strings have no escapes; interpreted strings and runes do.
       if (ch === "\\" && quote !== "`") i++;
       else if (ch === quote) quote = null;
       continue;
     }
     if (ch === '"' || ch === "'" || ch === "`") quote = ch;
-    else if (ch === "/" && line[i + 1] === "/") return line.slice(0, i);
+    else if (ch === "/" && line[i + 1] === "/") {
+      return { code: line.slice(0, i), inRawString: false };
+    }
   }
-  return line;
+  // Only a backtick can still be open at end of line; the other two forms
+  // cannot legally span one.
+  return { code: quote === "`" ? "" : line, inRawString: quote === "`" };
 }
 
 export interface ScanOptions {
@@ -206,14 +218,20 @@ export async function scanSource(
   const maxFiles = opts.maxFiles ?? 5000;
   const maxBytes = opts.maxBytesPerFile ?? 1_000_000;
 
-  // Bound the collected matches. `maxFiles` and `maxBytesPerFile` bound the
-  // input, not the output: a repository of large, densely matching files can
-  // accumulate millions of `SourceMatch` objects and exhaust the heap long
-  // before the file cap is reached. Nothing downstream needs more than a
-  // handful — the rules ask only for the first match, whether any exist, or
-  // whether one belongs to a given module.
+  // Bound the matches collected by the per-line scan. `maxFiles` and
+  // `maxBytesPerFile` bound the input, not the output: a repository of large,
+  // densely matching files can accumulate millions of `SourceMatch` objects and
+  // exhaust the heap long before the file cap is reached. Nothing downstream
+  // needs more than a handful — the rules ask only for the first match, whether
+  // any exist, or whether one belongs to a given module.
+  //
+  // The manifest-derived `modernEra` feeds below this loop do not pass through
+  // `record()` and are deliberately not capped here: they are already bounded
+  // by the number of manifests, itself bounded by `maxFiles`.
   const MAX_MATCHES_PER_SIGNAL = 500;
   const matches: Record<string, SourceMatch[]> = {};
+  /** One transport match per directory — see the record loop below. */
+  const transportDirs: Record<string, Set<string>> = {};
   for (const key of Object.keys(SIGNAL_PATTERNS)) matches[key] = [];
   for (const key of Object.keys(GO_SIGNAL_PATTERNS)) matches[key] ??= [];
   for (const key of Object.keys(GO_TRANSPORT_PATTERNS)) matches[key] ??= [];
@@ -236,6 +254,7 @@ export async function scanSource(
 
     const applicable: Record<string, RegExp>[] = [SIGNAL_PATTERNS];
     if (isGo) applicable.push(GO_SIGNAL_PATTERNS);
+    let inRawString = false;
 
     const lines = content.split(/\r?\n/);
     for (let i = 0; i < lines.length; i++) {
@@ -256,9 +275,21 @@ export async function scanSource(
       }
 
       if (!isGo || isGoTest) continue;
-      const code = stripGoLineComment(line);
+      const stripped = stripGoLineComment(line, inRawString);
+      inRawString = stripped.inRawString;
       for (const [signal, re] of Object.entries(GO_TRANSPORT_PATTERNS)) {
-        if (re.test(code)) record(signal);
+        if (!re.test(stripped.code)) continue;
+        // These two are only ever asked "does any match belong to module M",
+        // so one per directory is all the information there is. A flat count
+        // cap made the answer depend on directory names: with 600 correctly
+        // configured modules ahead of it, a genuinely stateful module named
+        // `zzz-broken` was never recorded and went unreported, while the same
+        // tree with the module renamed `aaa-broken` was caught.
+        const dir = relative.includes("/") ? relative.slice(0, relative.lastIndexOf("/") + 1) : "";
+        const seen = transportDirs[signal] ??= new Set<string>();
+        if (seen.has(dir)) continue;
+        seen.add(dir);
+        matches[signal].push({ file: relative, line: i + 1, text: line.trim().slice(0, 200) });
       }
     }
   }
@@ -886,10 +917,41 @@ function stripGoComment(line: string): { text: string; indirect: boolean } {
  * required version says nothing about, so a replaced module is reported by
  * nothing at all rather than reported wrongly.
  */
+/**
+ * Module paths replaced by a `go.work` file.
+ *
+ * A workspace `replace` overrides the module-level one for the entire build,
+ * so ignoring it produced exactly the confident lie `parseGoMod`'s own handling
+ * exists to prevent: the same directive, moved from `go.mod` into `go.work`,
+ * flipped a module from honest silence to a finding naming a version the
+ * workspace never resolves.
+ */
+export function parseGoWorkReplacements(content: string): string[] {
+  const replaced: string[] = [];
+  let inBlock = false;
+  for (const raw of content.split(/\r?\n/)) {
+    const { text } = stripGoComment(raw);
+    if (!text) continue;
+    if (inBlock) {
+      if (text === ")") inBlock = false;
+      else replaced.push(text.split(/\s+/)[0].replace(/^"(.*)"$/, "$1"));
+      continue;
+    }
+    if (/^replace\s*\($/.test(text)) {
+      inBlock = true;
+      continue;
+    }
+    const single = text.match(/^replace\s+(.*)$/);
+    if (single) replaced.push(single[1].trim().split(/\s+/)[0].replace(/^"(.*)"$/, "$1"));
+  }
+  return replaced.filter(Boolean);
+}
+
 export function parseGoMod(content: string): SdkDependency[] {
   const lines = content.split(/\r?\n/);
   const deps: SdkDependency[] = [];
   const replaced = new Set<string>();
+  const replacements = new Map<string, { name: string; version: string }>();
 
   type GoBlock = "require" | "replace" | "exclude" | "retract";
   let block: GoBlock | null = null;
@@ -897,8 +959,24 @@ export function parseGoMod(content: string): SdkDependency[] {
   const noteReplace = (text: string): void => {
     // `replace a => b v1.0.0` and `replace a v1.2.3 => ./local` both name the
     // replaced module first.
-    const module = text.split(/\s+/)[0]?.replace(/^"(.*)"$/, "$1");
-    if (module) replaced.add(module);
+    const unquote = (token: string) => token.replace(/^"(.*)"$/, "$1");
+    const module = unquote(text.split(/\s+/)[0] ?? "");
+    if (!module) return;
+
+    // A right-hand side that is itself `<module> <version>` is not opaque, and
+    // treating it as such was a one-line silencer: `replace X => X v1.6.1`
+    // changes nothing about the build, yet it cleared both MCP011 and MCP002
+    // off a genuinely legacy server. A replacement to a local path or a bare
+    // module stays unreadable, which is the honest answer for a fork.
+    const arrow = text.indexOf("=>");
+    if (arrow !== -1) {
+      const rhs = text.slice(arrow + 2).trim().split(/\s+/).map(unquote);
+      if (rhs.length === 2 && /^v\d/.test(rhs[1])) {
+        replacements.set(module, { name: rhs[0], version: rhs[1] });
+        return;
+      }
+    }
+    replaced.add(module);
   };
 
   const noteRequire = (text: string, lineNo: number, indirect: boolean): void => {
@@ -951,6 +1029,15 @@ export function parseGoMod(content: string): SdkDependency[] {
   // A `replace` anywhere in the file overrides the requirement wherever it was
   // written, so this has to be applied after the whole file has been read.
   for (const dep of deps) {
+    const to = replacements.get(dep.name);
+    if (to) {
+      // The build uses the replacement, so that is what gets classified — and
+      // reported, so the finding names what is actually there.
+      dep.replaced = true;
+      dep.constraint = to.version;
+      dep.sdkLine = classifyGoSdkVersion(to.name, to.version);
+      continue;
+    }
     if (!replaced.has(dep.name)) continue;
     dep.replaced = true;
     dep.sdkLine = "unknown";
@@ -973,6 +1060,13 @@ async function readGoModDependencies(
   maxFiles: number,
 ): Promise<{ deps: SdkDependency[]; manifests: string[] }> {
   const files = await collectMatchingFiles(dir, (name) => name === "go.mod", maxFiles);
+  const workFiles = await collectMatchingFiles(dir, (name) => name === "go.work", maxFiles);
+  const workReplaced = new Set<string>();
+  for (const workFile of workFiles) {
+    const content = await readIfSmallEnough(workFile, maxBytes);
+    if (content !== null) for (const m of parseGoWorkReplacements(content)) workReplaced.add(m);
+  }
+
   const deps: SdkDependency[] = [];
   const manifests: string[] = [];
   for (const file of files) {
@@ -983,7 +1077,13 @@ async function readGoModDependencies(
     // which silently collapsed every module's directory to the repository root.
     const relative = path.relative(dir, file).split(path.sep).join("/");
     manifests.push(relative);
-    for (const dep of parseGoMod(content)) deps.push({ ...dep, manifest: relative });
+    for (const dep of parseGoMod(content)) {
+      // A workspace replacement wins over whatever the module file says.
+      const overridden = workReplaced.has(dep.name)
+        ? { replaced: true, sdkLine: "unknown" as const }
+        : {};
+      deps.push({ ...dep, manifest: relative, ...overridden });
+    }
   }
   return { deps, manifests };
 }

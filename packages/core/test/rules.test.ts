@@ -561,6 +561,51 @@ test("an unclassifiable Go requirement is not spent as a critical", () => {
   }
 });
 
+test("Go evidence says nothing about a Python or TypeScript server", () => {
+  // `dirOf("go.mod")` is "" and every path starts with "", so a Go module at
+  // the repository root "owned" server.py and index.ts — and a polyglot repo
+  // with a Go tooling module acquitted its Python MCP server.
+  const ctx: SourceContext = {
+    matches: {
+      initialize: [{ file: "src/index.ts", line: 3, text: "server.oninitialized = …" }],
+      modernEra: [{ file: "go.mod", line: 3, text: `${GO_SDK} v1.7.0` }],
+    },
+    sdkVersion: null,
+    filesScanned: 2,
+    goManifests: ["go.mod"],
+    sdkDependencies: [goSdkDep(GO_SDK, "v1.7.0", { manifest: "go.mod" })],
+  };
+  assert.ok(ids({ source: ctx }).includes("MCP001"), "a Go version cannot acquit a TS server");
+});
+
+test("the verdict does not depend on which match sorts first", () => {
+  // Scoping to whichever match sorted first made two byte-identical trees
+  // disagree purely on directory names: the modern module's own dual-era
+  // token was selected, found acquitted, and the whole repository read clean.
+  const build = (modern: string, legacy: string): SourceContext => ({
+    matches: {
+      initialize: [
+        { file: `${modern}/main.go`, line: 9, text: "InitializedHandler:" },
+        { file: `${legacy}/main.go`, line: 9, text: "InitializedHandler:" },
+      ].sort((a, b) => a.file.localeCompare(b.file)),
+      modernEra: [{ file: `${modern}/go.mod`, line: 3, text: `${GO_SDK} v1.7.0` }],
+    },
+    sdkVersion: null,
+    filesScanned: 2,
+    goManifests: [`${modern}/go.mod`, `${legacy}/go.mod`],
+    sdkDependencies: [
+      goSdkDep(GO_SDK, "v1.7.0", { manifest: `${modern}/go.mod` }),
+      goSdkDep(GO_SDK, "v1.6.1", { manifest: `${legacy}/go.mod` }),
+    ],
+  });
+  for (const [modern, legacy] of [["a-modern", "z-legacy"], ["z-modern", "a-legacy"]]) {
+    assert.ok(
+      ids({ source: build(modern, legacy) }).includes("MCP001"),
+      `${modern} + ${legacy}: the legacy module is still legacy-only`,
+    );
+  }
+});
+
 test("MCP011 needs a checkout — a live probe cannot see go.mod", () => {
   assert.ok(!ids({ live: legacyOnly() }).includes("MCP011"));
 });

@@ -304,9 +304,11 @@ mismatch between things that appear identical. Check the lockfile, not just
 `package.json`.
 
 **Other languages.** Python has its own SDK rule, MCP009, because its v2
-migration keeps the `mcp` package name; Rust has MCP010 and Go has MCP011. C#
-is the one still not dependency-checked; inspect its actual SDK constraints
-rather than applying the TypeScript package-rename story.
+migration keeps the `mcp` package name; Rust has MCP010 and Go has MCP011.
+**C# is not scanned at all** — `.cs` files are not read, so a source scan of a
+C# server reports nothing, and that clean result means nothing. Inspect its SDK
+constraints by hand, or probe it live. Do not apply the TypeScript
+package-rename story to it.
 
 ---
 
@@ -570,7 +572,9 @@ string does not describe what would actually build:
 - a `// indirect` requirement — the toolchain asserts nothing here imports it,
   so it is not this project's SDK choice and `go mod tidy` may rewrite it.
 
-Check those by hand. `go.work` is not read at all.
+Check those by hand. `go.work` is read for its `replace` directives, which
+override the module-level ones for the whole workspace build; nothing else in
+it is.
 
 Case 2 is also an argument from absence: it fires only when the stateless
 opt-in appears nowhere in the scanned source. A server that sets it somewhere
