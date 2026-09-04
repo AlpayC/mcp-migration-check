@@ -987,7 +987,11 @@ export function parseGoWork(content: string): GoWorkspace {
 
   let block: "use" | "replace" | null = null;
   const noteUse = (text: string) => {
-    const value = unquote(text.trim().split(/\s+/)[0] ?? "");
+    const trimmed = text.trim();
+    // A quoted path may contain spaces, so the quotes have to be read before
+    // the whitespace split rather than stripped from the first token after it.
+    const quoted = trimmed.match(/^"([^"]*)"/);
+    const value = quoted ? quoted[1] : (trimmed.split(/\s+/)[0] ?? "");
     if (value) uses.push(value);
   };
   const noteReplace = (text: string) => {
@@ -1178,12 +1182,20 @@ async function readGoModDependencies(
     if (work.replacements.size === 0) continue;
     const workDir = path.dirname(workFile);
     for (const use of work.uses) {
+      const useDir = path.resolve(workDir, use);
+      // Go discovers a `go.work` in the working directory or an ANCESTOR of
+      // it — never a descendant. Verified against the toolchain: with
+      // `playground/go.work` saying `use ..`, `go env GOWORK` is empty when
+      // building the root module from the root, and names the file only when
+      // building from `playground/`. So a workspace below a module does not
+      // govern it in any build you would run to test that module, and letting
+      // it was a one-line way to silence findings from a subdirectory.
+      if (path.relative(workDir, useDir).startsWith("..")) continue;
       const manifest = path
-        .relative(dir, path.resolve(workDir, use, "go.mod"))
+        .relative(dir, path.join(useDir, "go.mod"))
         .split(path.sep)
         .join("/");
-      // `path.relative` escaping upward means the module is outside the scan
-      // root, so nothing here can be governed by it.
+      // Escaping the scan root upward means nothing here can be governed.
       if (manifest.startsWith("../")) continue;
       const existing = governed.get(manifest);
       if (!existing) {

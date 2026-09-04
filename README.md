@@ -293,10 +293,12 @@ the absence of the modern surface is a defect.
   `go.work` is read for `replace` directives only — a workspace replacement
   overrides the module-level one, so ignoring it reported versions the build
   never resolves — but not for anything else. A workspace governs only the
-  modules its `use` directives name, resolved against its own directory; a
-  `use` pointing through a symlink is ignored, and two workspaces that disagree
-  about one module leave it unreadable rather than letting directory order
-  decide. A clean MCP011 result
+  modules its `use` directives name, resolved against its own directory, and
+  only those at or below it: Go discovers a `go.work` in the working directory
+  or an ancestor, never a descendant, so a workspace buried in a subdirectory
+  is not in effect for the module above it. A `use` pointing through a symlink
+  is ignored, and two workspaces that disagree about one module leave it
+  unreadable rather than letting directory order decide. A clean MCP011 result
   therefore means no *classifiable* requirement is behind — a workspace or a
   replaced module can still be.
 - **Go comments and strings are scanned, not parsed.** The transport signals

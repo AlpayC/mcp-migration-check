@@ -575,9 +575,10 @@ string does not describe what would actually build:
 - a `// indirect` requirement — the toolchain asserts nothing here imports it,
   so it is not this project's SDK choice and `go mod tidy` may rewrite it.
 
-Check those by hand. `go.work` is read for its `replace` directives, which
-override the module-level ones for the whole workspace build; nothing else in
-it is.
+Check those by hand. `go.work` is read for its `use` and `replace` directives:
+a workspace replacement overrides the module-level one, but only for the
+modules that workspace `use`s, and only when it sits at or above them — Go
+finds a `go.work` in the working directory or an ancestor, never below.
 
 Case 2 is also an argument from absence: it fires only when the stateless
 opt-in appears nowhere in the scanned source. A server that sets it somewhere

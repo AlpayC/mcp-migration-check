@@ -1346,7 +1346,9 @@ function parseGoWork(content) {
   const unquote = (token) => token.replace(/^"(.*)"$/, "$1");
   let block = null;
   const noteUse = (text) => {
-    const value = unquote(text.trim().split(/\s+/)[0] ?? "");
+    const trimmed = text.trim();
+    const quoted = trimmed.match(/^"([^"]*)"/);
+    const value = quoted ? quoted[1] : trimmed.split(/\s+/)[0] ?? "";
     if (value) uses.push(value);
   };
   const noteReplace = (text) => {
@@ -1475,7 +1477,9 @@ async function readGoModDependencies(dir, maxBytes, maxFiles) {
     if (work.replacements.size === 0) continue;
     const workDir = path.dirname(workFile);
     for (const use of work.uses) {
-      const manifest = path.relative(dir, path.resolve(workDir, use, "go.mod")).split(path.sep).join("/");
+      const useDir = path.resolve(workDir, use);
+      if (path.relative(workDir, useDir).startsWith("..")) continue;
+      const manifest = path.relative(dir, path.join(useDir, "go.mod")).split(path.sep).join("/");
       if (manifest.startsWith("../")) continue;
       const existing = governed.get(manifest);
       if (!existing) {

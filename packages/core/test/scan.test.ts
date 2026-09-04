@@ -1070,24 +1070,24 @@ test("two workspaces disagreeing about a module make it unreadable, not arbitrar
   // either way — but last-writer-wins made it a fiction decided by readdir
   // order, and the same two directories renamed gave different verdicts on
   // byte-identical input.
+  // Both workspaces must be genuine ancestors of the module, since a
+  // descendant workspace governs nothing.
   const verdicts: (string | undefined)[] = [];
-  for (const [first, second] of [["v1.7.0", "v1.6.1"], ["v1.6.1", "v1.7.0"]]) {
+  for (const [outer, inner] of [["v1.7.0", "v1.6.1"], ["v1.6.1", "v1.7.0"]]) {
     await withTempDir(async (dir) => {
-      for (const name of ["svc", "w1", "w2"]) {
-        await fs.mkdir(path.join(dir, name), { recursive: true });
-      }
+      await fs.mkdir(path.join(dir, "nested", "svc"), { recursive: true });
       await fs.writeFile(
-        path.join(dir, "svc", "go.mod"),
+        path.join(dir, "nested", "svc", "go.mod"),
         `module m/svc\ngo 1.25.0\nrequire ${GO_SDK} v1.6.1\n`,
       );
-      await fs.writeFile(path.join(dir, "svc", "main.go"), "package main\n");
+      await fs.writeFile(path.join(dir, "nested", "svc", "main.go"), "package main\n");
       await fs.writeFile(
-        path.join(dir, "w1", "go.work"),
-        `go 1.25.0\nuse ../svc\nreplace ${GO_SDK} => ${GO_SDK} ${first}\n`,
+        path.join(dir, "go.work"),
+        `go 1.25.0\nuse ./nested/svc\nreplace ${GO_SDK} => ${GO_SDK} ${outer}\n`,
       );
       await fs.writeFile(
-        path.join(dir, "w2", "go.work"),
-        `go 1.25.0\nuse ../svc\nreplace ${GO_SDK} => ${GO_SDK} ${second}\n`,
+        path.join(dir, "nested", "go.work"),
+        `go 1.25.0\nuse ./svc\nreplace ${GO_SDK} => ${GO_SDK} ${inner}\n`,
       );
       const r = await scanSource(dir);
       verdicts.push(r.sdkDependencies?.[0].sdkLine);
@@ -1098,21 +1098,46 @@ test("two workspaces disagreeing about a module make it unreadable, not arbitrar
 
 test("two workspaces that agree are not made unreadable", async () => {
   await withTempDir(async (dir) => {
-    for (const name of ["svc", "w1", "w2"]) {
-      await fs.mkdir(path.join(dir, name), { recursive: true });
-    }
+    await fs.mkdir(path.join(dir, "nested", "svc"), { recursive: true });
     await fs.writeFile(
-      path.join(dir, "svc", "go.mod"),
+      path.join(dir, "nested", "svc", "go.mod"),
       `module m/svc\ngo 1.25.0\nrequire ${GO_SDK} v1.7.0\n`,
     );
-    await fs.writeFile(path.join(dir, "svc", "main.go"), "package main\n");
-    for (const w of ["w1", "w2"]) {
-      await fs.writeFile(
-        path.join(dir, w, "go.work"),
-        `go 1.25.0\nuse ../svc\nreplace ${GO_SDK} => ${GO_SDK} v1.6.1\n`,
-      );
-    }
+    await fs.writeFile(path.join(dir, "nested", "svc", "main.go"), "package main\n");
+    await fs.writeFile(
+      path.join(dir, "go.work"),
+      `go 1.25.0\nuse ./nested/svc\nreplace ${GO_SDK} => ${GO_SDK} v1.6.1\n`,
+    );
+    await fs.writeFile(
+      path.join(dir, "nested", "go.work"),
+      `go 1.25.0\nuse ./svc\nreplace ${GO_SDK} => ${GO_SDK} v1.6.1\n`,
+    );
     const r = await scanSource(dir);
     assert.equal(r.sdkDependencies?.[0].sdkLine, "legacy", "agreement is readable");
   });
+});
+
+test("a go.work below a module does not govern it", async () => {
+  // Go discovers a `go.work` in the working directory or an ancestor, never a
+  // descendant. Checked against the toolchain: with `playground/go.work`
+  // saying `use ..`, `go env GOWORK` is empty when building the root module
+  // from the root. Letting a descendant govern was a one-line way to silence
+  // findings from a subdirectory nobody builds from.
+  await withTempDir(async (dir) => {
+    await fs.mkdir(path.join(dir, "playground"), { recursive: true });
+    await fs.writeFile(path.join(dir, "go.mod"), `module m\nrequire ${GO_SDK} v1.6.1\n`);
+    await fs.writeFile(path.join(dir, "main.go"), "package main\n");
+    await fs.writeFile(
+      path.join(dir, "playground", "go.work"),
+      `go 1.25.0\nuse ..\nreplace ${GO_SDK} => ./fork\n`,
+    );
+    const r = await scanSource(dir);
+    assert.equal(r.sdkDependencies?.[0].sdkLine, "legacy", "a descendant workspace is not in effect");
+    assert.equal(r.sdkDependencies?.[0].replaced, undefined);
+  });
+});
+
+test("parseGoWork reads a quoted use path containing a space", () => {
+  const work = parseGoWork('go 1.25.0\nuse "./my svc"\n');
+  assert.deepEqual(work.uses, ["./my svc"]);
 });
