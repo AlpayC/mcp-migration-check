@@ -1186,8 +1186,30 @@ async function readGoModDependencies(
       // root, so nothing here can be governed by it.
       if (manifest.startsWith("../")) continue;
       const existing = governed.get(manifest);
-      if (existing) for (const [k, v] of work.replacements) existing.set(k, v);
-      else governed.set(manifest, new Map(work.replacements));
+      if (!existing) {
+        governed.set(manifest, new Map(work.replacements));
+        continue;
+      }
+      // Two workspaces can both `use` one module, and real Go activates
+      // exactly one at a time — so any merge is a fiction. Last-writer-wins
+      // made it a fiction decided by readdir order: the same two workspace
+      // directories, renamed, gave different verdicts on byte-identical
+      // input. On a conflict the honest answer is that the checker cannot
+      // know which workspace is active, so the module goes unreadable.
+      for (const [module, replacement] of work.replacements) {
+        if (!existing.has(module)) {
+          existing.set(module, replacement);
+          continue;
+        }
+        const prior = existing.get(module);
+        const same =
+          prior === replacement ||
+          (prior != null &&
+            replacement != null &&
+            prior.name === replacement.name &&
+            prior.version === replacement.version);
+        if (!same) existing.set(module, null);
+      }
     }
   }
 

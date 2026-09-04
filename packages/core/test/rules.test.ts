@@ -606,6 +606,44 @@ test("the verdict does not depend on which match sorts first", () => {
   }
 });
 
+test("Go evidence in no module cannot acquit a module", () => {
+  // Orphan evidence was folded in with npm/Python evidence and so went
+  // repository-wide, letting one stray `.go` file above every `go.mod` clear
+  // both criticals off every module below it — silently undoing an earlier
+  // round's scoping fix.
+  const ctx: SourceContext = {
+    matches: {
+      initialize: [{ file: "legacy/main.go", line: 9, text: "InitializedHandler:" }],
+      sessionId: [{ file: "legacy/main.go", line: 8, text: "GetSessionID:" }],
+      modernEra: [{ file: "tools.go", line: 5, text: "mcp.DiscoverResult{}" }],
+    },
+    sdkVersion: null,
+    filesScanned: 2,
+    goManifests: ["legacy/go.mod"],
+    sdkDependencies: [goSdkDep(GO_SDK, "v1.6.1", { manifest: "legacy/go.mod" })],
+  };
+  const fired = ids({ source: ctx });
+  assert.ok(fired.includes("MCP001"), "an orphan file speaks for no module");
+  assert.ok(fired.includes("MCP002"));
+});
+
+test("a file in no module is still answered for by evidence that exists", () => {
+  // The other half, and a separate decision: a `.go` file above every `go.mod`
+  // belongs to no module, so no module's staleness can be inferred about it
+  // either. It falls back rather than being denied evidence that is there.
+  const ctx: SourceContext = {
+    matches: {
+      sessionId: [{ file: "orphan.go", line: 4, text: 'SessionID string `json:"sessionId"`' }],
+      modernEra: [{ file: "svc/go.mod", line: 3, text: `${GO_SDK} v1.7.0` }],
+    },
+    sdkVersion: null,
+    filesScanned: 2,
+    goManifests: ["svc/go.mod"],
+    sdkDependencies: [goSdkDep(GO_SDK, "v1.7.0", { manifest: "svc/go.mod" })],
+  };
+  assert.ok(!ids({ source: ctx }).includes("MCP002"));
+});
+
 test("MCP011 needs a checkout — a live probe cannot see go.mod", () => {
   assert.ok(!ids({ live: legacyOnly() }).includes("MCP011"));
 });

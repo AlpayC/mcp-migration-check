@@ -175,6 +175,16 @@ interface GoScope {
   owner: Map<string, string | null>;
   /** Evidence from npm, Python or a non-Go source file. Repository-wide. */
   hasNonGoEvidence: boolean;
+  /**
+   * Go evidence in a file that belongs to no module.
+   *
+   * Its own bucket, deliberately. Folding it into `hasNonGoEvidence` made it
+   * repository-wide and let one stray `.go` file above every `go.mod` acquit
+   * every module below — reopening the over-reach a previous round had closed.
+   * A file with no owning module can be *answered for* by anything (see
+   * `servesModern`), but it cannot answer for a module it does not belong to.
+   */
+  hasOrphanGoEvidence: boolean;
   /** Manifests whose own module carries Go evidence. */
   goEvidenceOwners: Set<string>;
   anyEvidence: boolean;
@@ -189,17 +199,23 @@ interface GoScope {
  * The three input lengths are enough to catch every way this context is
  * actually assembled, and rebuilding is cheap when they change.
  */
-const goScopes = new WeakMap<object, GoScope & { stamp: string }>();
+const goScopes = new WeakMap<object, GoScope & { stamp: unknown[] }>();
 
 function goScopeOf(ctx: RuleContext): GoScope {
   const key = (ctx.source ?? ctx) as object;
-  const stamp = [
+  // Identity of the three inputs, not their lengths: a mutation that swaps a
+  // match's file for another of the same length would otherwise be served a
+  // scope built for the old one. Nothing shipped mutates a `SourceContext`
+  // after `scanSource` returns, but the suite reassigns these fields and the
+  // next caller should not have to know the difference.
+  const stamp: unknown[] = [
+    ctx.source?.matches.modernEra,
+    ctx.source?.goManifests,
+    ctx.source?.sdkDependencies,
     ctx.source?.matches.modernEra?.length ?? 0,
-    ctx.source?.goManifests?.length ?? 0,
-    ctx.source?.sdkDependencies?.length ?? 0,
-  ].join(":");
+  ];
   const cached = goScopes.get(key);
-  if (cached && cached.stamp === stamp) return cached;
+  if (cached && cached.stamp.every((v, i) => v === stamp[i])) return cached;
 
   const manifests = new Set<string>(ctx.source?.goManifests ?? []);
   for (const dep of ctx.source?.sdkDependencies ?? []) {
@@ -213,6 +229,7 @@ function goScopeOf(ctx: RuleContext): GoScope {
     dirs,
     owner: new Map(),
     hasNonGoEvidence: false,
+    hasOrphanGoEvidence: false,
     goEvidenceOwners: new Set(),
     anyEvidence: false,
   };
@@ -232,11 +249,11 @@ function goScopeOf(ctx: RuleContext): GoScope {
       continue;
     }
     const owner = resolve(match.file);
-    if (owner === null) scope.hasNonGoEvidence = true;
+    if (owner === null) scope.hasOrphanGoEvidence = true;
     else scope.goEvidenceOwners.add(owner);
   }
 
-  const stamped = scope as GoScope & { stamp: string; resolve: typeof resolve };
+  const stamped = scope as GoScope & { stamp: unknown[]; resolve: typeof resolve };
   stamped.stamp = stamp;
   stamped.resolve = resolve;
   goScopes.set(key, stamped);
@@ -290,7 +307,7 @@ function servesModern(ctx: RuleContext, forFile?: string): boolean {
   if (!isGoPath(forFile)) return scope.hasNonGoEvidence;
   if (scope.hasNonGoEvidence) return true;
   const owner = owningGoManifest(ctx, forFile);
-  if (owner === null) return true;
+  if (owner === null) return scope.hasOrphanGoEvidence || scope.goEvidenceOwners.size > 0;
   return scope.goEvidenceOwners.has(owner);
 }
 

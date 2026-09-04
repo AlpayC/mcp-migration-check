@@ -1064,3 +1064,55 @@ test("a fork replacement never mints modern-era evidence", async () => {
     assert.equal(r.matches.modernEra.length, 1, "a version pin is evidence");
   });
 });
+
+test("two workspaces disagreeing about a module make it unreadable, not arbitrary", async () => {
+  // Real Go activates one workspace at a time, so merging them is a fiction
+  // either way — but last-writer-wins made it a fiction decided by readdir
+  // order, and the same two directories renamed gave different verdicts on
+  // byte-identical input.
+  const verdicts: (string | undefined)[] = [];
+  for (const [first, second] of [["v1.7.0", "v1.6.1"], ["v1.6.1", "v1.7.0"]]) {
+    await withTempDir(async (dir) => {
+      for (const name of ["svc", "w1", "w2"]) {
+        await fs.mkdir(path.join(dir, name), { recursive: true });
+      }
+      await fs.writeFile(
+        path.join(dir, "svc", "go.mod"),
+        `module m/svc\ngo 1.25.0\nrequire ${GO_SDK} v1.6.1\n`,
+      );
+      await fs.writeFile(path.join(dir, "svc", "main.go"), "package main\n");
+      await fs.writeFile(
+        path.join(dir, "w1", "go.work"),
+        `go 1.25.0\nuse ../svc\nreplace ${GO_SDK} => ${GO_SDK} ${first}\n`,
+      );
+      await fs.writeFile(
+        path.join(dir, "w2", "go.work"),
+        `go 1.25.0\nuse ../svc\nreplace ${GO_SDK} => ${GO_SDK} ${second}\n`,
+      );
+      const r = await scanSource(dir);
+      verdicts.push(r.sdkDependencies?.[0].sdkLine);
+    });
+  }
+  assert.deepEqual(verdicts, ["unknown", "unknown"], "order must not decide the verdict");
+});
+
+test("two workspaces that agree are not made unreadable", async () => {
+  await withTempDir(async (dir) => {
+    for (const name of ["svc", "w1", "w2"]) {
+      await fs.mkdir(path.join(dir, name), { recursive: true });
+    }
+    await fs.writeFile(
+      path.join(dir, "svc", "go.mod"),
+      `module m/svc\ngo 1.25.0\nrequire ${GO_SDK} v1.7.0\n`,
+    );
+    await fs.writeFile(path.join(dir, "svc", "main.go"), "package main\n");
+    for (const w of ["w1", "w2"]) {
+      await fs.writeFile(
+        path.join(dir, w, "go.work"),
+        `go 1.25.0\nuse ../svc\nreplace ${GO_SDK} => ${GO_SDK} v1.6.1\n`,
+      );
+    }
+    const r = await scanSource(dir);
+    assert.equal(r.sdkDependencies?.[0].sdkLine, "legacy", "agreement is readable");
+  });
+});

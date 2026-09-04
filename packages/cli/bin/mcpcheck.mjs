@@ -83,12 +83,13 @@ var goScopes = /* @__PURE__ */ new WeakMap();
 function goScopeOf(ctx) {
   const key = ctx.source ?? ctx;
   const stamp = [
-    ctx.source?.matches.modernEra?.length ?? 0,
-    ctx.source?.goManifests?.length ?? 0,
-    ctx.source?.sdkDependencies?.length ?? 0
-  ].join(":");
+    ctx.source?.matches.modernEra,
+    ctx.source?.goManifests,
+    ctx.source?.sdkDependencies,
+    ctx.source?.matches.modernEra?.length ?? 0
+  ];
   const cached = goScopes.get(key);
-  if (cached && cached.stamp === stamp) return cached;
+  if (cached && cached.stamp.every((v, i) => v === stamp[i])) return cached;
   const manifests = new Set(ctx.source?.goManifests ?? []);
   for (const dep of ctx.source?.sdkDependencies ?? []) {
     if (dep.ecosystem === "go") manifests.add(dep.manifest);
@@ -98,6 +99,7 @@ function goScopeOf(ctx) {
     dirs,
     owner: /* @__PURE__ */ new Map(),
     hasNonGoEvidence: false,
+    hasOrphanGoEvidence: false,
     goEvidenceOwners: /* @__PURE__ */ new Set(),
     anyEvidence: false
   };
@@ -115,7 +117,7 @@ function goScopeOf(ctx) {
       continue;
     }
     const owner = resolve(match.file);
-    if (owner === null) scope.hasNonGoEvidence = true;
+    if (owner === null) scope.hasOrphanGoEvidence = true;
     else scope.goEvidenceOwners.add(owner);
   }
   const stamped = scope;
@@ -149,7 +151,7 @@ function servesModern(ctx, forFile) {
   if (!isGoPath(forFile)) return scope.hasNonGoEvidence;
   if (scope.hasNonGoEvidence) return true;
   const owner = owningGoManifest(ctx, forFile);
-  if (owner === null) return true;
+  if (owner === null) return scope.hasOrphanGoEvidence || scope.goEvidenceOwners.size > 0;
   return scope.goEvidenceOwners.has(owner);
 }
 function versionsClause(ctx) {
@@ -1476,8 +1478,19 @@ async function readGoModDependencies(dir, maxBytes, maxFiles) {
       const manifest = path.relative(dir, path.resolve(workDir, use, "go.mod")).split(path.sep).join("/");
       if (manifest.startsWith("../")) continue;
       const existing = governed.get(manifest);
-      if (existing) for (const [k, v] of work.replacements) existing.set(k, v);
-      else governed.set(manifest, new Map(work.replacements));
+      if (!existing) {
+        governed.set(manifest, new Map(work.replacements));
+        continue;
+      }
+      for (const [module, replacement] of work.replacements) {
+        if (!existing.has(module)) {
+          existing.set(module, replacement);
+          continue;
+        }
+        const prior = existing.get(module);
+        const same = prior === replacement || prior != null && replacement != null && prior.name === replacement.name && prior.version === replacement.version;
+        if (!same) existing.set(module, null);
+      }
     }
   }
   const deps = [];
