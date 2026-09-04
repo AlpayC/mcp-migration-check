@@ -79,17 +79,13 @@ function isGoPath(file) {
   const base = file.replace(/\\/g, "/").split("/").pop() ?? "";
   return base.endsWith(".go") || base === "go.mod";
 }
-var goScopes = /* @__PURE__ */ new WeakMap();
+var goScope = null;
+function resetGoScope() {
+  goScope = null;
+}
 function goScopeOf(ctx) {
   const key = ctx.source ?? ctx;
-  const stamp = [
-    ctx.source?.matches.modernEra,
-    ctx.source?.goManifests,
-    ctx.source?.sdkDependencies,
-    ctx.source?.matches.modernEra?.length ?? 0
-  ];
-  const cached = goScopes.get(key);
-  if (cached && cached.stamp.every((v, i) => v === stamp[i])) return cached;
+  if (goScope && goScope.key === key) return goScope.scope;
   const manifests = new Set(ctx.source?.goManifests ?? []);
   for (const dep of ctx.source?.sdkDependencies ?? []) {
     if (dep.ecosystem === "go") manifests.add(dep.manifest);
@@ -120,10 +116,8 @@ function goScopeOf(ctx) {
     if (owner === null) scope.hasOrphanGoEvidence = true;
     else scope.goEvidenceOwners.add(owner);
   }
-  const stamped = scope;
-  stamped.stamp = stamp;
-  stamped.resolve = resolve;
-  goScopes.set(key, stamped);
+  scope.resolve = resolve;
+  goScope = { key, scope };
   return scope;
 }
 function owningGoManifest(ctx, file) {
@@ -534,6 +528,7 @@ function gradeFrom(findings) {
   return { score, letter };
 }
 function evaluate(ctx) {
+  resetGoScope();
   const order = ["critical", "warning", "info"];
   return rules.map((r) => r.evaluate(ctx)).filter((f) => f !== null).sort((a, b) => order.indexOf(a.severity) - order.indexOf(b.severity));
 }

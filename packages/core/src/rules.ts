@@ -191,31 +191,29 @@ interface GoScope {
 }
 
 /**
- * Cached per source context, with a cheap staleness check.
+ * The index for the current evaluation, and only the current one.
  *
- * The cache exists for speed, but a `SourceContext` is an ordinary mutable
- * object — the test suite builds one and then assigns `sdkDependencies` to it —
- * so keying on identity alone would serve a scope built before the mutation.
- * The three input lengths are enough to catch every way this context is
- * actually assembled, and rebuilding is cheap when they change.
+ * It exists for speed: without it, MCP002's search resolved ownership per
+ * candidate and per evidence item, and 1500 modules took 28.8 seconds.
+ *
+ * It is cleared at the top of every `evaluate()` rather than invalidated,
+ * because invalidation was the wrong question to be answering. A
+ * `SourceContext` is an ordinary mutable object, and a stamp over its inputs
+ * caught reassignment but not an in-place edit that preserved identity and
+ * length — adequate for every shipped path, and adequate is a poor property
+ * for a cache nobody will think about again. Built once per run, there is
+ * nothing to go stale.
  */
-const goScopes = new WeakMap<object, GoScope & { stamp: unknown[] }>();
+let goScope: { key: object; scope: GoScope } | null = null;
+
+/** Drop the cached index. Called by `evaluate()` before running the rules. */
+export function resetGoScope(): void {
+  goScope = null;
+}
 
 function goScopeOf(ctx: RuleContext): GoScope {
   const key = (ctx.source ?? ctx) as object;
-  // Identity of the three inputs, not their lengths: a mutation that swaps a
-  // match's file for another of the same length would otherwise be served a
-  // scope built for the old one. Nothing shipped mutates a `SourceContext`
-  // after `scanSource` returns, but the suite reassigns these fields and the
-  // next caller should not have to know the difference.
-  const stamp: unknown[] = [
-    ctx.source?.matches.modernEra,
-    ctx.source?.goManifests,
-    ctx.source?.sdkDependencies,
-    ctx.source?.matches.modernEra?.length ?? 0,
-  ];
-  const cached = goScopes.get(key);
-  if (cached && cached.stamp.every((v, i) => v === stamp[i])) return cached;
+  if (goScope && goScope.key === key) return goScope.scope;
 
   const manifests = new Set<string>(ctx.source?.goManifests ?? []);
   for (const dep of ctx.source?.sdkDependencies ?? []) {
@@ -253,10 +251,8 @@ function goScopeOf(ctx: RuleContext): GoScope {
     else scope.goEvidenceOwners.add(owner);
   }
 
-  const stamped = scope as GoScope & { stamp: unknown[]; resolve: typeof resolve };
-  stamped.stamp = stamp;
-  stamped.resolve = resolve;
-  goScopes.set(key, stamped);
+  (scope as GoScope & { resolve: typeof resolve }).resolve = resolve;
+  goScope = { key, scope };
   return scope;
 }
 
