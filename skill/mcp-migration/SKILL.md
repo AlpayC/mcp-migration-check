@@ -46,6 +46,9 @@ above. There *is* an official codemod, and it is a separate package:
 npx @modelcontextprotocol/codemod@latest v1-to-v2 .
 ```
 
+**That codemod is TypeScript-only.** Do not reach for it, or for a package
+rename, when the project is Go — which is the next thing on this list.
+
 6. **The Go SDK moved by a minor, on the same module path.**
    `github.com/modelcontextprotocol/go-sdk` speaks 2026-07-28 from **v1.7.0**;
    v1.6.1 is the last release on 2025-11-25. There is no `go-sdk/v2` — the

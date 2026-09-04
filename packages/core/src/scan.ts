@@ -1,4 +1,4 @@
-import { promises as fs } from "node:fs";
+import { constants, promises as fs } from "node:fs";
 import path from "node:path";
 import type {
   CargoSection,
@@ -104,8 +104,14 @@ const SIGNAL_PATTERNS: Record<string, RegExp> = {
 /**
  * Signals that only run over `.go` files.
  *
- * Every alternative is qualified — `mcp.`, `server.`, `client.`, or a method
- * call on a receiver — and that is not stylistic. An earlier version matched
+ * Every alternative is qualified — by a package selector, or by a method call
+ * on a receiver — and that is not stylistic.
+ *
+ * The selector is `\w+\.` rather than a literal `mcp.` because Go lets an
+ * import be aliased (`import mcpsdk "…/go-sdk/mcp"`), and pinning the package
+ * name made an aliased server invisible. These type names are distinctive
+ * enough to carry a match on their own; it was the *bare* form that was
+ * dangerous. An earlier version matched
  * bare identifiers such as `AddRoots`, `EnableSampling`, `NewLoggingHandler`
  * and `SessionIdManager`, and because `SIGNAL_PATTERNS` runs over every
  * language, a two-line TypeScript file declaring `CreateMessageRequest` and
@@ -116,16 +122,24 @@ const SIGNAL_PATTERNS: Record<string, RegExp> = {
  */
 const GO_SIGNAL_PATTERNS: Record<string, RegExp> = {
   initialize:
-    /\bmcp\.Initialized?(?:Params|Request|Result)\b|\.InitializeParams\s*\(\)|\.(?:Add|On)(?:Before|After)Initialize\b|\bInitializedHandler\s*:/,
+    /\b\w+\.Initialized?(?:Params|Request|Result)\b|\.InitializeParams\s*\(\)|\.(?:Add|On)(?:Before|After)Initialize\b|\bInitializedHandler\s*:/,
   sessionId: /\bGetSessionID\s*[:=]|\bserver\.WithSessionIdManager(?:Resolver)?\s*\(/,
+  // `server.WithLogging()` takes NO arguments in mcp-go, and the empty parens
+  // are what separates it from every other Go middleware library's
+  // `server.WithLogging(logger)` — `server` being the most common variable name
+  // in Go for an HTTP server, that distinction is the whole guard.
   logging:
-    /\bmcp\.LoggingMessageParams\b|\bmcp\.NewLoggingHandler\s*\(|\bserver\.WithLogging\s*\(|\.SendLogMessageToClient\s*\(/,
+    /\b\w+\.LoggingMessageParams\b|\b\w+\.NewLoggingHandler\s*\(|\bserver\.WithLogging\s*\(\s*\)|\.SendLogMessageToClient\s*\(/,
   sampling:
-    /\bmcp\.CreateMessage(?:Params|Result|Request)\b|\bCreateMessageHandler\s*:|\.(?:EnableSampling|RequestSampling)\s*\(|\bclient\.WithSamplingHandler\s*\(/,
+    /\b\w+\.CreateMessage(?:Params|Result|Request)\b|\bCreateMessageHandler\s*:|\.(?:EnableSampling|RequestSampling)\s*\(|\bclient\.WithSamplingHandler\s*\(/,
+  // The bare `.AddRoots(` / `.RemoveRoots(` family is deliberately gone: it
+  // accepted any receiver at all, and convicted a Go LSP server whose
+  // workspace type has exactly those methods. `WithRoots()` is zero-argument in
+  // mcp-go, same reasoning as WithLogging above.
   roots:
-    /\bmcp\.ListRoots(?:Params|Result)\b|\bserver\.WithRoots\s*\(|\.(?:AddRoots|RemoveRoots|RequestRoots)\s*\(|\bclient\.WithRootsHandler\s*\(/,
+    /\b\w+\.ListRoots(?:Params|Result)\b|\bserver\.WithRoots\s*\(\s*\)|\bclient\.WithRootsHandler\s*\(/,
   modernEra:
-    /\bmcp\.MetaKey(?:ProtocolVersion|ClientInfo|ServerInfo|ClientCapabilities|SubscriptionID)\b|\bmcp\.ProtocolVersion20260728\b|\bmcp\.Discover(?:Params|Result)\b|["']subscriptions\/listen["']/,
+    /\b\w+\.MetaKey(?:ProtocolVersion|ClientInfo|ServerInfo|ClientCapabilities|SubscriptionID)\b|\b\w+\.ProtocolVersion20260728\b|\b\w+\.Discover(?:Params|Result)\b|["']subscriptions\/listen["']/,
 };
 
 /**
@@ -142,18 +156,42 @@ const GO_SIGNAL_PATTERNS: Record<string, RegExp> = {
  * confession, not a configuration.
  */
 const GO_TRANSPORT_PATTERNS: Record<string, RegExp> = {
-  goStreamableHttp: /StreamableHTTP(?:Handler|Options|Server)\b|\bStreamableServerTransport\b/,
+  // Package-qualified: an earlier form matched any identifier ending in
+  // `StreamableHTTPServer`, so an unrelated module declaring `type
+  // StreamableHTTPServer struct{}` was enough to convict the module beside it.
+  goStreamableHttp:
+    /\b\w+\.(?:NewStreamableHTTPHandler|NewStreamableHTTPServer|StreamableHTTPOptions|StreamableHTTPHandler|StreamableServerTransport)\b/,
   // `WithStateLess` takes a bool, so the argument has to be read: passing
   // `false` is an explicit declaration of statefulness, not an opt-in.
   goStatelessOptIn:
     /\bStateless\s*:\s*true\b|\.Stateless\s*=\s*true\b|\bWithStateLess\s*\(\s*true\s*\)|\bStatelessSessionIdManager\b/,
 };
 
-/** Drop a `//` line comment. Go string literals containing `//` do not matter
- *  to the patterns above, none of which can match inside a URL. */
+/**
+ * Drop a `//` line comment, respecting string literals.
+ *
+ * `indexOf("//")` is not good enough, and the failure is not the one you would
+ * expect. The risk was never matching *inside* a URL — it was truncating the
+ * line at one and deleting the code that followed. A single line reading
+ * `&mcp.StreamableHTTPOptions{Endpoint: "https://…", Stateless: true}` lost its
+ * opt-in and was reported as stateful; moving a URL onto a transport line hid a
+ * genuine defect the other way. Go has three string forms and all three can
+ * carry a `//`.
+ */
 function stripGoLineComment(line: string): string {
-  const at = line.indexOf("//");
-  return at === -1 ? line : line.slice(0, at);
+  let quote: '"' | "'" | "`" | null = null;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (quote) {
+      // Raw strings (backticks) have no escapes; the other two do.
+      if (ch === "\\" && quote !== "`") i++;
+      else if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === "`") quote = ch;
+    else if (ch === "/" && line[i + 1] === "/") return line.slice(0, i);
+  }
+  return line;
 }
 
 export interface ScanOptions {
@@ -168,6 +206,13 @@ export async function scanSource(
   const maxFiles = opts.maxFiles ?? 5000;
   const maxBytes = opts.maxBytesPerFile ?? 1_000_000;
 
+  // Bound the collected matches. `maxFiles` and `maxBytesPerFile` bound the
+  // input, not the output: a repository of large, densely matching files can
+  // accumulate millions of `SourceMatch` objects and exhaust the heap long
+  // before the file cap is reached. Nothing downstream needs more than a
+  // handful — the rules ask only for the first match, whether any exist, or
+  // whether one belongs to a given module.
+  const MAX_MATCHES_PER_SIGNAL = 500;
   const matches: Record<string, SourceMatch[]> = {};
   for (const key of Object.keys(SIGNAL_PATTERNS)) matches[key] = [];
   for (const key of Object.keys(GO_SIGNAL_PATTERNS)) matches[key] ??= [];
@@ -183,7 +228,7 @@ export async function scanSource(
     const content = await readIfSmallEnough(file, maxBytes);
     if (content === null) continue;
     filesScanned++;
-    const relative = path.relative(dir, file);
+    const relative = path.relative(dir, file).split(path.sep).join("/");
     const isGo = path.extname(file) === ".go";
     // A Go test file may legitimately exercise the legacy path, so it must not
     // decide how the production transport beside it is configured.
@@ -195,12 +240,14 @@ export async function scanSource(
     const lines = content.split(/\r?\n/);
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
-      const record = (signal: string) =>
+      const record = (signal: string) => {
+        if (matches[signal].length >= MAX_MATCHES_PER_SIGNAL) return;
         matches[signal].push({
           file: relative,
           line: i + 1,
           text: line.trim().slice(0, 200),
         });
+      };
 
       for (const patterns of applicable) {
         for (const [signal, re] of Object.entries(patterns)) {
@@ -216,7 +263,7 @@ export async function scanSource(
     }
   }
 
-  const pkg = await readPackageJson(dir);
+  const pkg = await readPackageJson(dir, maxBytes);
   // A dependency on the v2 packages is modern-era evidence even when no source
   // line matched — a freshly generated server may not spell any of the `_meta`
   // keys out literally.
@@ -236,10 +283,8 @@ export async function scanSource(
     });
   }
 
-  const sdkDependencies = [
-    ...(await readCargoDependencies(dir)),
-    ...(await readGoModDependencies(dir, maxBytes, maxFiles)),
-  ];
+  const go = await readGoModDependencies(dir, maxBytes, maxFiles);
+  const sdkDependencies = [...(await readCargoDependencies(dir, maxBytes)), ...go.deps];
 
   // Go needs this feed more than any other ecosystem, because a modern Go
   // server usually spells nothing modern in its own source: the SDK answers
@@ -270,7 +315,14 @@ export async function scanSource(
     });
   }
 
-  return { matches, sdkVersion: pkg.sdkVersion, pythonSdkRequirements, filesScanned, sdkDependencies };
+  return {
+    matches,
+    sdkVersion: pkg.sdkVersion,
+    pythonSdkRequirements,
+    filesScanned,
+    sdkDependencies,
+    goManifests: go.manifests,
+  };
 }
 
 /**
@@ -545,9 +597,11 @@ const MODERN_PACKAGES = [
  */
 async function readPackageJson(
   dir: string,
+  maxBytes: number,
 ): Promise<{ sdkVersion: string | null; modernPackages: string[] }> {
   try {
-    const raw = await fs.readFile(path.join(dir, "package.json"), "utf8");
+    const raw = await readIfSmallEnough(path.join(dir, "package.json"), maxBytes);
+    if (raw === null) return { sdkVersion: null, modernPackages: [] };
     const pkg = JSON.parse(raw);
     const deps = { ...pkg.devDependencies, ...pkg.dependencies };
     const dep = deps["@modelcontextprotocol/sdk"];
@@ -701,13 +755,12 @@ export function parseCargoToml(content: string): SdkDependency[] {
   return deps;
 }
 
-async function readCargoDependencies(dir: string): Promise<SdkDependency[]> {
-  try {
-    const raw = await fs.readFile(path.join(dir, "Cargo.toml"), "utf8");
-    return parseCargoToml(raw);
-  } catch {
-    return [];
-  }
+async function readCargoDependencies(
+  dir: string,
+  maxBytes: number,
+): Promise<SdkDependency[]> {
+  const raw = await readIfSmallEnough(path.join(dir, "Cargo.toml"), maxBytes);
+  return raw === null ? [] : parseCargoToml(raw);
 }
 
 /**
@@ -918,17 +971,40 @@ async function readGoModDependencies(
   dir: string,
   maxBytes: number,
   maxFiles: number,
-): Promise<SdkDependency[]> {
-  const manifests = await collectMatchingFiles(dir, (name) => name === "go.mod", maxFiles);
-  const found: SdkDependency[] = [];
-  for (const manifest of manifests) {
-    const content = await readIfSmallEnough(manifest, maxBytes);
+): Promise<{ deps: SdkDependency[]; manifests: string[] }> {
+  const files = await collectMatchingFiles(dir, (name) => name === "go.mod", maxFiles);
+  const deps: SdkDependency[] = [];
+  const manifests: string[] = [];
+  for (const file of files) {
+    const content = await readIfSmallEnough(file, maxBytes);
     if (content === null) continue;
-    const relative = path.relative(dir, manifest);
-    for (const dep of parseGoMod(content)) found.push({ ...dep, manifest: relative });
+    // Path separators are normalized here, once. Ownership compares these
+    // against match paths, and on win32 `path.relative` yields backslashes —
+    // which silently collapsed every module's directory to the repository root.
+    const relative = path.relative(dir, file).split(path.sep).join("/");
+    manifests.push(relative);
+    for (const dep of parseGoMod(content)) deps.push({ ...dep, manifest: relative });
   }
-  return found;
+  return { deps, manifests };
 }
+
+/**
+ * Read-only, never through a symlink, and never blocking on the open itself.
+ *
+ * `O_NOFOLLOW` refuses a symlink atomically, so there is no check-then-open
+ * window. `O_NONBLOCK` is what makes the fifo case work at all: opening a fifo
+ * read-only *blocks until a writer appears*, so the `isFile()` guard below was
+ * never reached — the walk protected itself with a dirent check, but the root
+ * manifests do not come from the walk, and a fifo named `package.json` hung the
+ * scan exactly as `pipe.go` once did. On a regular file both flags are inert.
+ *
+ * Both are POSIX; where a platform does not define them this degrades to a
+ * plain read-only open and the `isFile()` check carries what weight it can.
+ */
+const SAFE_READ_FLAGS =
+  constants.O_RDONLY |
+  (typeof constants.O_NOFOLLOW === "number" ? constants.O_NOFOLLOW : 0) |
+  (typeof constants.O_NONBLOCK === "number" ? constants.O_NONBLOCK : 0);
 
 /**
  * Read a file, or return null if it is too large, not a regular file, or
@@ -949,7 +1025,12 @@ async function readIfSmallEnough(
 ): Promise<string | null> {
   let handle: import("node:fs/promises").FileHandle | undefined;
   try {
-    handle = await fs.open(file, "r");
+    // O_NOFOLLOW refuses a symlink in the open itself, so there is no window
+    // between checking and opening — the same reasoning as the single handle
+    // above. The walk already rejects symlinked entries, but the root
+    // manifests do not come from the walk, and `package.json` and `Cargo.toml`
+    // were still readable through one.
+    handle = await fs.open(file, SAFE_READ_FLAGS);
     const stat = await handle.stat();
     if (!stat.isFile()) return null;
     if (stat.size > maxBytes) return null;

@@ -21,9 +21,11 @@ var SPEC = {
   // Per-SDK authoritative references for MCP010 multi-crate coverage.
   towerMcp: "https://github.com/joshrotenberg/tower-mcp",
   rustMcpSdk: "https://github.com/rust-mcp-stack/rust-mcp-sdk",
-  // Go's own story is not on the spec site either. The SDK announcement is the
-  // document that states both halves of it: which release speaks the revision,
-  // and that serving it over HTTP is a separate opt-in.
+  // Go's own story is not on the spec site either. `SPEC.sdk` above — the SDK
+  // announcement — is the document that states both halves of it: which release
+  // speaks the revision, and that serving it over HTTP is a separate opt-in, so
+  // MCP011 cites that as its specRef. These two are the version-pinned package
+  // pages it carries as supporting references.
   goSdk: "https://pkg.go.dev/github.com/modelcontextprotocol/go-sdk@v1.7.0/mcp",
   markThreeLabsMcpGo: "https://pkg.go.dev/github.com/mark3labs/mcp-go@v1.0.0/mcp"
 };
@@ -52,6 +54,14 @@ var SPEC_VERIFIED_AT = {
   [SPEC.markThreeLabsMcpGo]: "2026-09-03"
 };
 var rulesVerifiedAt = Object.values(SPEC_VERIFIED_AT).sort()[0];
+function goSdkUnclassifiable(ctx, match) {
+  const owner = owningGoManifest(ctx, match.file);
+  if (owner === null) return false;
+  const deps = (ctx.source?.sdkDependencies ?? []).filter(
+    (d) => d.ecosystem === "go" && d.manifest === owner
+  );
+  return deps.length > 0 && deps.every((d) => d.sdkLine === "unknown");
+}
 function firstMatch(ctx, signal) {
   return ctx.source?.matches[signal]?.[0];
 }
@@ -61,19 +71,43 @@ function loc(match) {
 function clamp(value, max = 80) {
   return value.length <= max ? value : `${value.slice(0, max)}\u2026`;
 }
-function ownedBy(ctx, manifest, deps) {
-  const dirOf = (m) => m.includes("/") ? m.slice(0, m.lastIndexOf("/") + 1) : "";
+function dirOf(manifest) {
+  const p = manifest.replace(/\\/g, "/");
+  return p.includes("/") ? p.slice(0, p.lastIndexOf("/") + 1) : "";
+}
+function goManifestsOf(ctx) {
+  const declared = (ctx.source?.sdkDependencies ?? []).filter((d) => d.ecosystem === "go").map((d) => d.manifest);
+  return [.../* @__PURE__ */ new Set([...ctx.source?.goManifests ?? [], ...declared])];
+}
+function ownedBy(ctx, manifest) {
   const own = dirOf(manifest);
-  const deeper = deps.map((d) => dirOf(d.manifest)).filter((dir) => dir !== own && dir.startsWith(own));
+  const deeper = goManifestsOf(ctx).map(dirOf).filter((dir) => dir !== own && dir.startsWith(own));
   return (match) => {
     const file = match.file.replace(/\\/g, "/");
     if (!file.startsWith(own)) return false;
     return !deeper.some((dir) => file.startsWith(dir));
   };
 }
-function servesModern(ctx) {
+function owningGoManifest(ctx, file) {
+  const normalized = file.replace(/\\/g, "/");
+  let best = null;
+  for (const manifest of goManifestsOf(ctx)) {
+    const dir = dirOf(manifest);
+    if (!normalized.startsWith(dir)) continue;
+    if (best === null || dir.length > dirOf(best).length) best = manifest;
+  }
+  return best;
+}
+function servesModern(ctx, forFile) {
   if (ctx.live && (ctx.live.era === "modern" || ctx.live.era === "dual")) return true;
-  return (ctx.source?.matches.modernEra?.length ?? 0) > 0;
+  const evidence = ctx.source?.matches.modernEra ?? [];
+  if (evidence.length === 0) return false;
+  if (!forFile) return evidence.length > 0;
+  const owner = owningGoManifest(ctx, forFile);
+  return evidence.some((match) => {
+    if (!match.file.endsWith("go.mod")) return true;
+    return owner !== null && match.file === owner;
+  });
 }
 function versionsClause(ctx) {
   const v = ctx.live?.supportedVersions ?? [];
@@ -86,7 +120,8 @@ var rules = [
     severity: "critical",
     specRef: SPEC.versioning,
     evaluate(ctx) {
-      if (servesModern(ctx)) return null;
+      const legacySignal = firstMatch(ctx, "initialize") ?? firstMatch(ctx, "pythonV1Sdk") ?? firstMatch(ctx, "pythonServerSdk");
+      if (servesModern(ctx, legacySignal?.file)) return null;
       const live = ctx.live?.respondsToLegacyInitialize;
       const v1PythonApi = firstMatch(ctx, "pythonV1Sdk");
       const v1PythonRequirement = ctx.source?.pythonSdkRequirements?.some(
@@ -115,7 +150,8 @@ var rules = [
     specRef: SPEC.transport,
     evaluate(ctx) {
       const live = ctx.live?.sessionIdOnModernRequest;
-      const src = servesModern(ctx) ? void 0 : firstMatch(ctx, "sessionId");
+      const candidate = firstMatch(ctx, "sessionId");
+      const src = candidate && !servesModern(ctx, candidate.file) && !goSdkUnclassifiable(ctx, candidate) ? candidate : void 0;
       if (!live && !src) return null;
       return {
         ruleId: "MCP002",
@@ -340,7 +376,7 @@ var rules = [
         if (dep.sdkLine === "legacy") {
           const target = dep.name === "github.com/mark3labs/mcp-go" ? "v1.0.0" : "v1.7.0";
           hits.push({
-            manifest: dep.manifest,
+            location: `${dep.manifest}:${dep.line ?? 0}`,
             detail: `${dep.manifest} requires ${dep.name} ${clamp(dep.constraint)}, which is below ${target} \u2014 the first release of that module speaking 2026-07-28.`,
             fix: `Upgrade ${dep.name} to ${target} or later (\`go get ${dep.name}@${target}\`), then run your tests. The module path does not change: Go crossed the protocol break inside its existing major, so there is no v2 import path to rewrite.`
           });
@@ -349,26 +385,29 @@ var rules = [
       for (const dep of deps) {
         if (dep.name !== "github.com/modelcontextprotocol/go-sdk") continue;
         if (dep.sdkLine !== "modern" || dep.indirect || dep.replaced) continue;
-        const owned = ownedBy(ctx, dep.manifest, deps);
+        const owned = ownedBy(ctx, dep.manifest);
         const http = ctx.source?.matches.goStreamableHttp?.find(owned);
         if (!http) continue;
         if (ctx.source?.matches.goStatelessOptIn?.some(owned)) continue;
         hits.push({
-          manifest: dep.manifest,
+          location: `${dep.manifest}:${dep.line ?? 0}`,
           detail: `${dep.manifest} requires ${dep.name} ${clamp(dep.constraint)}, which speaks 2026-07-28, but the streamable HTTP transport at ${http.file}:${http.line} is configured without \`Stateless\`. That transport serves the revision only when it is stateless; left as is, clients negotiate down to 2025-11-25.`,
           fix: "Set `Stateless: true` in `StreamableHTTPOptions`, and move any per-session state onto explicit handles passed as tool arguments. Upgrading the module is not enough on its own \u2014 serving the revision over HTTP is a separate, deliberate choice. A stdio server needs no such flag."
         });
       }
       if (hits.length === 0) return null;
+      const details = [...new Set(hits.map((h) => h.detail))];
+      const shown = details.slice(0, 10);
+      const detail = details.length > shown.length ? `${shown.join(" ")} \u2026and ${details.length - shown.length} further module(s).` : shown.join(" ");
       return {
         ruleId: "MCP011",
         title: "Go MCP SDK not serving the 2026-07-28 revision",
         severity: "warning",
-        detail: hits.map((h) => h.detail).join(" "),
-        fix: hits.map((h) => h.fix).join(" "),
+        detail,
+        fix: [...new Set(hits.map((h) => h.fix))].join(" "),
         specRef: SPEC.sdk,
         references: [SPEC.goSdk, SPEC.markThreeLabsMcpGo],
-        location: hits[0].manifest
+        location: hits[0].location
       };
     }
   },
@@ -723,7 +762,7 @@ function advertisedMetadataUrl(header) {
 }
 
 // packages/core/src/scan.ts
-import { promises as fs } from "node:fs";
+import { constants, promises as fs } from "node:fs";
 import path from "node:path";
 var SCANNABLE = /* @__PURE__ */ new Set([".ts", ".tsx", ".js", ".mjs", ".cjs", ".py", ".go", ".rs"]);
 var IGNORED_DIRS = /* @__PURE__ */ new Set([
@@ -791,26 +830,48 @@ var SIGNAL_PATTERNS = {
   modernEra: /io\.modelcontextprotocol\/(protocolVersion|clientCapabilities|clientInfo|serverInfo)|["']server\/discover["']|@modelcontextprotocol\/(server|client|core)\b|\bfrom\s+mcp\.server\s+import\s+[^#\n]*\bMCPServer\b|\bfrom\s+mcp\.server\.mcpserver(?:\.[A-Za-z_][\w.]*)?\s+import\b/
 };
 var GO_SIGNAL_PATTERNS = {
-  initialize: /\bmcp\.Initialized?(?:Params|Request|Result)\b|\.InitializeParams\s*\(\)|\.(?:Add|On)(?:Before|After)Initialize\b|\bInitializedHandler\s*:/,
+  initialize: /\b\w+\.Initialized?(?:Params|Request|Result)\b|\.InitializeParams\s*\(\)|\.(?:Add|On)(?:Before|After)Initialize\b|\bInitializedHandler\s*:/,
   sessionId: /\bGetSessionID\s*[:=]|\bserver\.WithSessionIdManager(?:Resolver)?\s*\(/,
-  logging: /\bmcp\.LoggingMessageParams\b|\bmcp\.NewLoggingHandler\s*\(|\bserver\.WithLogging\s*\(|\.SendLogMessageToClient\s*\(/,
-  sampling: /\bmcp\.CreateMessage(?:Params|Result|Request)\b|\bCreateMessageHandler\s*:|\.(?:EnableSampling|RequestSampling)\s*\(|\bclient\.WithSamplingHandler\s*\(/,
-  roots: /\bmcp\.ListRoots(?:Params|Result)\b|\bserver\.WithRoots\s*\(|\.(?:AddRoots|RemoveRoots|RequestRoots)\s*\(|\bclient\.WithRootsHandler\s*\(/,
-  modernEra: /\bmcp\.MetaKey(?:ProtocolVersion|ClientInfo|ServerInfo|ClientCapabilities|SubscriptionID)\b|\bmcp\.ProtocolVersion20260728\b|\bmcp\.Discover(?:Params|Result)\b|["']subscriptions\/listen["']/
+  // `server.WithLogging()` takes NO arguments in mcp-go, and the empty parens
+  // are what separates it from every other Go middleware library's
+  // `server.WithLogging(logger)` — `server` being the most common variable name
+  // in Go for an HTTP server, that distinction is the whole guard.
+  logging: /\b\w+\.LoggingMessageParams\b|\b\w+\.NewLoggingHandler\s*\(|\bserver\.WithLogging\s*\(\s*\)|\.SendLogMessageToClient\s*\(/,
+  sampling: /\b\w+\.CreateMessage(?:Params|Result|Request)\b|\bCreateMessageHandler\s*:|\.(?:EnableSampling|RequestSampling)\s*\(|\bclient\.WithSamplingHandler\s*\(/,
+  // The bare `.AddRoots(` / `.RemoveRoots(` family is deliberately gone: it
+  // accepted any receiver at all, and convicted a Go LSP server whose
+  // workspace type has exactly those methods. `WithRoots()` is zero-argument in
+  // mcp-go, same reasoning as WithLogging above.
+  roots: /\b\w+\.ListRoots(?:Params|Result)\b|\bserver\.WithRoots\s*\(\s*\)|\bclient\.WithRootsHandler\s*\(/,
+  modernEra: /\b\w+\.MetaKey(?:ProtocolVersion|ClientInfo|ServerInfo|ClientCapabilities|SubscriptionID)\b|\b\w+\.ProtocolVersion20260728\b|\b\w+\.Discover(?:Params|Result)\b|["']subscriptions\/listen["']/
 };
 var GO_TRANSPORT_PATTERNS = {
-  goStreamableHttp: /StreamableHTTP(?:Handler|Options|Server)\b|\bStreamableServerTransport\b/,
+  // Package-qualified: an earlier form matched any identifier ending in
+  // `StreamableHTTPServer`, so an unrelated module declaring `type
+  // StreamableHTTPServer struct{}` was enough to convict the module beside it.
+  goStreamableHttp: /\b\w+\.(?:NewStreamableHTTPHandler|NewStreamableHTTPServer|StreamableHTTPOptions|StreamableHTTPHandler|StreamableServerTransport)\b/,
   // `WithStateLess` takes a bool, so the argument has to be read: passing
   // `false` is an explicit declaration of statefulness, not an opt-in.
   goStatelessOptIn: /\bStateless\s*:\s*true\b|\.Stateless\s*=\s*true\b|\bWithStateLess\s*\(\s*true\s*\)|\bStatelessSessionIdManager\b/
 };
 function stripGoLineComment(line) {
-  const at = line.indexOf("//");
-  return at === -1 ? line : line.slice(0, at);
+  let quote = null;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (quote) {
+      if (ch === "\\" && quote !== "`") i++;
+      else if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === "`") quote = ch;
+    else if (ch === "/" && line[i + 1] === "/") return line.slice(0, i);
+  }
+  return line;
 }
 async function scanSource(dir, opts = {}) {
   const maxFiles = opts.maxFiles ?? 5e3;
   const maxBytes = opts.maxBytesPerFile ?? 1e6;
+  const MAX_MATCHES_PER_SIGNAL = 500;
   const matches = {};
   for (const key of Object.keys(SIGNAL_PATTERNS)) matches[key] = [];
   for (const key of Object.keys(GO_SIGNAL_PATTERNS)) matches[key] ??= [];
@@ -821,7 +882,7 @@ async function scanSource(dir, opts = {}) {
     const content = await readIfSmallEnough(file, maxBytes);
     if (content === null) continue;
     filesScanned++;
-    const relative = path.relative(dir, file);
+    const relative = path.relative(dir, file).split(path.sep).join("/");
     const isGo = path.extname(file) === ".go";
     const isGoTest = isGo && file.endsWith("_test.go");
     const applicable = [SIGNAL_PATTERNS];
@@ -829,11 +890,14 @@ async function scanSource(dir, opts = {}) {
     const lines = content.split(/\r?\n/);
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
-      const record = (signal) => matches[signal].push({
-        file: relative,
-        line: i + 1,
-        text: line.trim().slice(0, 200)
-      });
+      const record = (signal) => {
+        if (matches[signal].length >= MAX_MATCHES_PER_SIGNAL) return;
+        matches[signal].push({
+          file: relative,
+          line: i + 1,
+          text: line.trim().slice(0, 200)
+        });
+      };
       for (const patterns of applicable) {
         for (const [signal, re] of Object.entries(patterns)) {
           if (re.test(line)) record(signal);
@@ -846,7 +910,7 @@ async function scanSource(dir, opts = {}) {
       }
     }
   }
-  const pkg = await readPackageJson(dir);
+  const pkg = await readPackageJson(dir, maxBytes);
   for (const name of pkg.modernPackages) {
     matches.modernEra.push({ file: "package.json", line: 0, text: name });
   }
@@ -859,10 +923,8 @@ async function scanSource(dir, opts = {}) {
       text: req.requirement
     });
   }
-  const sdkDependencies = [
-    ...await readCargoDependencies(dir),
-    ...await readGoModDependencies(dir, maxBytes, maxFiles)
-  ];
+  const go = await readGoModDependencies(dir, maxBytes, maxFiles);
+  const sdkDependencies = [...await readCargoDependencies(dir, maxBytes), ...go.deps];
   for (const dep of sdkDependencies) {
     if (dep.ecosystem !== "go" || dep.sdkLine !== "modern") continue;
     if (dep.indirect || dep.replaced) continue;
@@ -872,7 +934,14 @@ async function scanSource(dir, opts = {}) {
       text: `${dep.name} ${dep.constraint}`
     });
   }
-  return { matches, sdkVersion: pkg.sdkVersion, pythonSdkRequirements, filesScanned, sdkDependencies };
+  return {
+    matches,
+    sdkVersion: pkg.sdkVersion,
+    pythonSdkRequirements,
+    filesScanned,
+    sdkDependencies,
+    goManifests: go.manifests
+  };
 }
 function classifyPythonSdkSpecifier(specifier) {
   const value = specifier.trim().replace(/^(["'])(.*)\1$/, "$2").trim();
@@ -1062,9 +1131,10 @@ var MODERN_PACKAGES = [
   "@modelcontextprotocol/client",
   "@modelcontextprotocol/core"
 ];
-async function readPackageJson(dir) {
+async function readPackageJson(dir, maxBytes) {
   try {
-    const raw = await fs.readFile(path.join(dir, "package.json"), "utf8");
+    const raw = await readIfSmallEnough(path.join(dir, "package.json"), maxBytes);
+    if (raw === null) return { sdkVersion: null, modernPackages: [] };
     const pkg = JSON.parse(raw);
     const deps = { ...pkg.devDependencies, ...pkg.dependencies };
     const dep = deps["@modelcontextprotocol/sdk"];
@@ -1166,13 +1236,9 @@ function parseCargoToml(content) {
   closeSubTable();
   return deps;
 }
-async function readCargoDependencies(dir) {
-  try {
-    const raw = await fs.readFile(path.join(dir, "Cargo.toml"), "utf8");
-    return parseCargoToml(raw);
-  } catch {
-    return [];
-  }
+async function readCargoDependencies(dir, maxBytes) {
+  const raw = await readIfSmallEnough(path.join(dir, "Cargo.toml"), maxBytes);
+  return raw === null ? [] : parseCargoToml(raw);
 }
 var MCP_GO_MODULES = {
   "github.com/modelcontextprotocol/go-sdk": [1, 7, 0],
@@ -1258,20 +1324,23 @@ function parseGoMod(content) {
   return deps;
 }
 async function readGoModDependencies(dir, maxBytes, maxFiles) {
-  const manifests = await collectMatchingFiles(dir, (name) => name === "go.mod", maxFiles);
-  const found = [];
-  for (const manifest of manifests) {
-    const content = await readIfSmallEnough(manifest, maxBytes);
+  const files = await collectMatchingFiles(dir, (name) => name === "go.mod", maxFiles);
+  const deps = [];
+  const manifests = [];
+  for (const file of files) {
+    const content = await readIfSmallEnough(file, maxBytes);
     if (content === null) continue;
-    const relative = path.relative(dir, manifest);
-    for (const dep of parseGoMod(content)) found.push({ ...dep, manifest: relative });
+    const relative = path.relative(dir, file).split(path.sep).join("/");
+    manifests.push(relative);
+    for (const dep of parseGoMod(content)) deps.push({ ...dep, manifest: relative });
   }
-  return found;
+  return { deps, manifests };
 }
+var SAFE_READ_FLAGS = constants.O_RDONLY | (typeof constants.O_NOFOLLOW === "number" ? constants.O_NOFOLLOW : 0) | (typeof constants.O_NONBLOCK === "number" ? constants.O_NONBLOCK : 0);
 async function readIfSmallEnough(file, maxBytes) {
   let handle;
   try {
-    handle = await fs.open(file, "r");
+    handle = await fs.open(file, SAFE_READ_FLAGS);
     const stat = await handle.stat();
     if (!stat.isFile()) return null;
     if (stat.size > maxBytes) return null;

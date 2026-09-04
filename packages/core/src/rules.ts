@@ -47,9 +47,11 @@ const SPEC = {
   // Per-SDK authoritative references for MCP010 multi-crate coverage.
   towerMcp: "https://github.com/joshrotenberg/tower-mcp",
   rustMcpSdk: "https://github.com/rust-mcp-stack/rust-mcp-sdk",
-  // Go's own story is not on the spec site either. The SDK announcement is the
-  // document that states both halves of it: which release speaks the revision,
-  // and that serving it over HTTP is a separate opt-in.
+  // Go's own story is not on the spec site either. `SPEC.sdk` above — the SDK
+  // announcement — is the document that states both halves of it: which release
+  // speaks the revision, and that serving it over HTTP is a separate opt-in, so
+  // MCP011 cites that as its specRef. These two are the version-pinned package
+  // pages it carries as supporting references.
   goSdk: "https://pkg.go.dev/github.com/modelcontextprotocol/go-sdk@v1.7.0/mcp",
   markThreeLabsMcpGo: "https://pkg.go.dev/github.com/mark3labs/mcp-go@v1.0.0/mcp",
 } as const;
@@ -95,6 +97,26 @@ export const SPEC_VERIFIED_AT: Record<string, string> = {
 /** The oldest citation date — what a report should quote, not the newest. */
 export const rulesVerifiedAt = Object.values(SPEC_VERIFIED_AT).sort()[0];
 
+/**
+ * Is this match inside a Go module whose MCP SDK requirement cannot be read?
+ *
+ * A `replace` to a fork and a `go get …@main` pseudo-version are both routine,
+ * and both leave the requirement unclassifiable. MCP011 already stays quiet for
+ * them. MCP002's source arm did not, and its silence is not neutral: absence of
+ * modern evidence is what lets it fire, so "we cannot tell" was being spent as
+ * a *critical* — on a `SessionID` tool argument, which is the very thing
+ * MCP002's own fix recommends. MCP010 skips a crate it cannot parse rather than
+ * guessing, and AGENTS.md is explicit: when you cannot tell, stay quiet.
+ */
+function goSdkUnclassifiable(ctx: RuleContext, match: SourceMatch): boolean {
+  const owner = owningGoManifest(ctx, match.file);
+  if (owner === null) return false;
+  const deps = (ctx.source?.sdkDependencies ?? []).filter(
+    (d) => d.ecosystem === "go" && d.manifest === owner,
+  );
+  return deps.length > 0 && deps.every((d) => d.sdkLine === "unknown");
+}
+
 /** Pick the first source match for a signal, if any, for location reporting. */
 function firstMatch(ctx: RuleContext, signal: string): SourceMatch | undefined {
   return ctx.source?.matches[signal]?.[0];
@@ -126,15 +148,23 @@ function clamp(value: string, max = 80): string {
  * to this — which is what stops a legacy sibling module from convicting a
  * modern one.
  */
-function ownedBy(
-  ctx: RuleContext,
-  manifest: string,
-  deps: SdkDependency[],
-): (match: SourceMatch) => boolean {
-  const dirOf = (m: string) => (m.includes("/") ? m.slice(0, m.lastIndexOf("/") + 1) : "");
+function dirOf(manifest: string): string {
+  const p = manifest.replace(/\\/g, "/");
+  return p.includes("/") ? p.slice(0, p.lastIndexOf("/") + 1) : "";
+}
+
+/** Every `go.mod` the scan saw — not only those declaring a recognised SDK. */
+function goManifestsOf(ctx: RuleContext): string[] {
+  const declared = (ctx.source?.sdkDependencies ?? [])
+    .filter((d) => d.ecosystem === "go")
+    .map((d) => d.manifest);
+  return [...new Set([...(ctx.source?.goManifests ?? []), ...declared])];
+}
+
+function ownedBy(ctx: RuleContext, manifest: string): (match: SourceMatch) => boolean {
   const own = dirOf(manifest);
-  const deeper = deps
-    .map((d) => dirOf(d.manifest))
+  const deeper = goManifestsOf(ctx)
+    .map(dirOf)
     .filter((dir) => dir !== own && dir.startsWith(own));
 
   return (match: SourceMatch) => {
@@ -142,6 +172,18 @@ function ownedBy(
     if (!file.startsWith(own)) return false;
     return !deeper.some((dir) => file.startsWith(dir));
   };
+}
+
+/** The `go.mod` whose directory most closely encloses `file`, if any. */
+function owningGoManifest(ctx: RuleContext, file: string): string | null {
+  const normalized = file.replace(/\\/g, "/");
+  let best: string | null = null;
+  for (const manifest of goManifestsOf(ctx)) {
+    const dir = dirOf(manifest);
+    if (!normalized.startsWith(dir)) continue;
+    if (best === null || dir.length > dirOf(best).length) best = manifest;
+  }
+  return best;
 }
 
 /**
@@ -152,9 +194,25 @@ function ownedBy(
  * prove a server works, but finding the modern machinery is enough to stop
  * calling the legacy path a defect — which is the failure this guards against.
  */
-function servesModern(ctx: RuleContext): boolean {
+function servesModern(ctx: RuleContext, forFile?: string): boolean {
   if (ctx.live && (ctx.live.era === "modern" || ctx.live.era === "dual")) return true;
-  return (ctx.source?.matches.modernEra?.length ?? 0) > 0;
+  const evidence = ctx.source?.matches.modernEra ?? [];
+  if (evidence.length === 0) return false;
+  if (!forFile) return evidence.length > 0;
+
+  // Evidence read from a `go.mod` speaks for that module and no other. A
+  // monorepo that migrated one module had otherwise acquitted every module
+  // beside it: dropping this repository's own `go-notes-mcp` fixture next to a
+  // single migrated `go.mod` silenced both of its criticals, 60 points, with
+  // nothing in CI pinning the direction of the over-reach.
+  //
+  // Evidence from any other source — the npm v2 packages, a modern Python
+  // constraint, a literal in the source — is repository-wide as it always was.
+  const owner = owningGoManifest(ctx, forFile);
+  return evidence.some((match) => {
+    if (!match.file.endsWith("go.mod")) return true;
+    return owner !== null && match.file === owner;
+  });
 }
 
 /**
@@ -177,7 +235,11 @@ export const rules: Rule[] = [
     severity: "critical",
     specRef: SPEC.versioning,
     evaluate(ctx): Finding | null {
-      if (servesModern(ctx)) return null;
+      const legacySignal =
+        firstMatch(ctx, "initialize") ??
+        firstMatch(ctx, "pythonV1Sdk") ??
+        firstMatch(ctx, "pythonServerSdk");
+      if (servesModern(ctx, legacySignal?.file)) return null;
 
       const live = ctx.live?.respondsToLegacyInitialize;
       const v1PythonApi = firstMatch(ctx, "pythonV1Sdk");
@@ -228,7 +290,11 @@ export const rules: Rule[] = [
       // Source: a session-id reference is a hazard only if this is not already
       // a dual-era server. If the modern path is there, the session machinery
       // belongs to the legacy path and static analysis cannot say more.
-      const src = servesModern(ctx) ? undefined : firstMatch(ctx, "sessionId");
+      const candidate = firstMatch(ctx, "sessionId");
+      const src =
+        candidate && !servesModern(ctx, candidate.file) && !goSdkUnclassifiable(ctx, candidate)
+          ? candidate
+          : undefined;
       if (!live && !src) return null;
 
       return {
@@ -488,7 +554,7 @@ export const rules: Rule[] = [
 
       // Every affected module is collected: reporting only the first hides the
       // second until the first is fixed. Same shape as MCP010.
-      const hits: { detail: string; fix: string; manifest: string }[] = [];
+      const hits: { detail: string; fix: string; location: string }[] = [];
 
       for (const dep of deps) {
         // An `// indirect` requirement is not this project's SDK choice — the
@@ -501,7 +567,7 @@ export const rules: Rule[] = [
           const target =
             dep.name === "github.com/mark3labs/mcp-go" ? "v1.0.0" : "v1.7.0";
           hits.push({
-            manifest: dep.manifest,
+            location: `${dep.manifest}:${dep.line ?? 0}`,
             detail: `${dep.manifest} requires ${dep.name} ${clamp(dep.constraint)}, which is below ${target} — the first release of that module speaking 2026-07-28.`,
             fix: `Upgrade ${dep.name} to ${target} or later (\`go get ${dep.name}@${target}\`), then run your tests. The module path does not change: Go crossed the protocol break inside its existing major, so there is no v2 import path to rewrite.`,
           });
@@ -531,28 +597,42 @@ export const rules: Rule[] = [
         if (dep.name !== "github.com/modelcontextprotocol/go-sdk") continue;
         if (dep.sdkLine !== "modern" || dep.indirect || dep.replaced) continue;
 
-        const owned = ownedBy(ctx, dep.manifest, deps);
+        const owned = ownedBy(ctx, dep.manifest);
         const http = ctx.source?.matches.goStreamableHttp?.find(owned);
         if (!http) continue;
         if (ctx.source?.matches.goStatelessOptIn?.some(owned)) continue;
 
         hits.push({
-          manifest: dep.manifest,
+          location: `${dep.manifest}:${dep.line ?? 0}`,
           detail: `${dep.manifest} requires ${dep.name} ${clamp(dep.constraint)}, which speaks 2026-07-28, but the streamable HTTP transport at ${http.file}:${http.line} is configured without \`Stateless\`. That transport serves the revision only when it is stateless; left as is, clients negotiate down to 2025-11-25.`,
           fix: "Set `Stateless: true` in `StreamableHTTPOptions`, and move any per-session state onto explicit handles passed as tool arguments. Upgrading the module is not enough on its own — serving the revision over HTTP is a separate, deliberate choice. A stdio server needs no such flag.",
         });
       }
 
       if (hits.length === 0) return null;
+
+      // A monorepo can carry hundreds of modules on the same stale line, and
+      // `readGoModDependencies` walks. Un-deduplicated, 5000 nested modules
+      // produced a 1.4 MB `fix` that was one sentence repeated 5000 times, and
+      // `scripts/action-report.mjs` writes `detail` straight into
+      // GITHUB_STEP_SUMMARY, which GitHub caps at 1 MiB. Identical advice is
+      // said once; the list of affected manifests is what gets truncated.
+      const details = [...new Set(hits.map((h) => h.detail))];
+      const shown = details.slice(0, 10);
+      const detail =
+        details.length > shown.length
+          ? `${shown.join(" ")} …and ${details.length - shown.length} further module(s).`
+          : shown.join(" ");
+
       return {
         ruleId: "MCP011",
         title: "Go MCP SDK not serving the 2026-07-28 revision",
         severity: "warning",
-        detail: hits.map((h) => h.detail).join(" "),
-        fix: hits.map((h) => h.fix).join(" "),
+        detail,
+        fix: [...new Set(hits.map((h) => h.fix))].join(" "),
         specRef: SPEC.sdk,
         references: [SPEC.goSdk, SPEC.markThreeLabsMcpGo],
-        location: hits[0].manifest,
+        location: hits[0].location,
       };
     },
   },

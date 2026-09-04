@@ -67,11 +67,12 @@ a dependency check against the manifest that pins its SDK:
 | C#                          | —                                                           | none yet   |
 
 Every language above is also grepped for the protocol signals behind
-MCP001–MCP005, which are language-neutral. C# source is scanned for those
-signals too, but no C# SDK rule exists yet: that SDK moved to a 2.x major of
-the `ModelContextProtocol` packages, so the TypeScript and Python migration
-advice does not carry over. A live probe needs no language at all — it only
-speaks HTTP.
+MCP001–MCP005, which are language-neutral. **C# is not scanned at all** — the
+scanner does not read `.cs` files and there is no C# SDK rule, so a source scan
+of a C# server reports nothing and that clean result means nothing. That SDK
+moved to a 2.x major of the `ModelContextProtocol` packages, so the TypeScript
+and Python migration advice does not carry over either. Probe a C# server live
+instead: a live probe needs no language at all, it only speaks HTTP.
 
 **Go is the one that does not rhyme.** The other three SDKs announce the
 protocol break in the version number — a new major, or a rename. Go did not:
@@ -260,17 +261,16 @@ the absence of the modern surface is a defect.
   more authoritative for runtime behavior; the two complement each other.
 - **The web demo only sees the outside.** It probes over HTTP, so it cannot
   reach the SDK rules: MCP007 needs `package.json`, MCP009 needs Python
-  project metadata or source, and MCP011 needs `go.mod`. Use the skill or CLI
-  for repository checks.
+  project metadata or source, MCP010 needs `Cargo.toml`, and MCP011 needs
+  `go.mod`. Use the skill or CLI for repository checks.
 - **MCP001 proves absence, which is the weaker claim.** It fires when the
   legacy handshake answers and no modern signal did. A server whose modern
   surface is hidden behind a WAF, a path-based gateway or an unfamiliar-method
   filter lands there wrongly. The dual-era observation cannot fail the same
   way — it needs a positive modern answer to fire at all.
-- **SDK dependency checks currently cover TypeScript, Python, Rust, and Go.**
-  C# servers still get the language-neutral source signals, but no SDK-version
-  finding. That SDK moved differently, so do not apply the TypeScript or Python
-  migration advice to it.
+- **A source scan does not read C# at all.** `.cs` is not in the scanned
+  extension list, so a C# repository produces no findings and no signals — not
+  a clean bill of health, an empty one. Probe those servers live.
 - **The Rust `Cargo.toml` parser is line-oriented and reads only the root
   manifest.** It reads `[dependencies]`, `[dev-dependencies]` and
   `[workspace.dependencies]`, in the inline-string, inline-table and
@@ -282,12 +282,13 @@ the absence of the modern surface is a defect.
   crate version.
 - **The `go.mod` parser walks, but it is not the Go toolchain.** It reads
   `require` in both the single-line and block forms across every `go.mod` under
-  the scan root, and records `// indirect`. It deliberately reports nothing for
-  three cases, because in each the version string does not describe what would
-  actually build: a module named by a `replace` directive (which can point at a
-  fork or a local path), a pseudo-version such as
-  `v1.6.2-0.20260801000000-abcdef123456` (which names a commit, not a release),
-  and a `+incompatible` tag. `go.work` is not read at all. A clean MCP011 result
+  the scan root. It deliberately reports nothing for four kinds of requirement,
+  because in each the version string does not describe what would actually
+  build: one named by a `replace` directive (which can point at a fork or a
+  local path), a pseudo-version such as `v1.6.2-0.20260801000000-abcdef123456`
+  (which names a commit, not a release), a `+incompatible` tag, and one marked
+  `// indirect` (which the toolchain maintains to mean nothing here imports it).
+  `go.work` is not read at all. A clean MCP011 result
   therefore means no *classifiable* requirement is behind — a workspace or a
   replaced module can still be.
 - **MCP011's second case argues from absence.** A modern `go-sdk` serving

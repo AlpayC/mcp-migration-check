@@ -192,6 +192,16 @@ export interface SourceContext {
    * `sdkVersion` and Python through `pythonSdkRequirements`.
    */
   sdkDependencies?: SdkDependency[];
+  /**
+   * Every `go.mod` found under the scan root, whether or not it declares an
+   * MCP module.
+   *
+   * Module ownership needs all of them. Deriving it from `sdkDependencies`
+   * alone made a nested module that happens to declare no MCP SDK invisible,
+   * and its files were then attributed to the parent module — which produced a
+   * finding naming a transport in a directory the parent does not own.
+   */
+  goManifests?: string[];
   filesScanned: number;
 }
 

@@ -482,7 +482,7 @@ test("MCP011 blames the module that declares the requirement, not a sibling", ()
   };
   const f = evaluate({ source: ctx }).find((x) => x.ruleId === "MCP011");
   assert.ok(f);
-  assert.equal(f.location, "legacy/demo/go.mod", "the finding belongs to the legacy module");
+  assert.ok(f.location?.startsWith("legacy/demo/go.mod"), "the finding belongs to the legacy module");
   assert.ok(
     !f.detail.includes("services/notes/go.mod"),
     "the modern module must not be blamed for a sibling's transport",
@@ -494,6 +494,71 @@ test("MCP011 clamps an overlong version token before quoting it", () => {
   const f = evaluate({ source: ctx }).find((x) => x.ruleId === "MCP011");
   assert.ok(f);
   assert.ok(f.detail.length < 300, `detail should be clamped, got ${f.detail.length}`);
+});
+
+test("a migrated module does not acquit an un-migrated one beside it", () => {
+  // Modern evidence read from a go.mod speaks for that module and no other.
+  // Repository-wide, a single migrated sibling silenced both criticals on this
+  // repo's own go-notes-mcp fixture — 60 points — and nothing pinned it.
+  const ctx: SourceContext = {
+    matches: {
+      initialize: [{ file: "legacy/main.go", line: 12, text: "InitializedHandler:" }],
+      sessionId: [{ file: "legacy/main.go", line: 9, text: "GetSessionID:" }],
+      modernEra: [
+        { file: "tools/go.mod", line: 3, text: `${GO_SDK} v1.7.0` },
+      ],
+    },
+    sdkVersion: null,
+    filesScanned: 2,
+    goManifests: ["legacy/go.mod", "tools/go.mod"],
+    sdkDependencies: [
+      goSdkDep(GO_SDK, "v1.6.1", { manifest: "legacy/go.mod" }),
+      goSdkDep(GO_SDK, "v1.7.0", { manifest: "tools/go.mod" }),
+    ],
+  };
+  const fired = ids({ source: ctx });
+  assert.ok(fired.includes("MCP001"), "the legacy module is still legacy-only");
+  assert.ok(fired.includes("MCP002"), "and its session handling is still unguarded");
+});
+
+test("modern evidence still covers the module it belongs to", () => {
+  const ctx: SourceContext = {
+    matches: {
+      sessionId: [{ file: "svc/main.go", line: 9, text: "GetSessionID:" }],
+      modernEra: [{ file: "svc/go.mod", line: 3, text: `${GO_SDK} v1.7.0` }],
+    },
+    sdkVersion: null,
+    filesScanned: 1,
+    goManifests: ["svc/go.mod"],
+    sdkDependencies: [goSdkDep(GO_SDK, "v1.7.0", { manifest: "svc/go.mod" })],
+  };
+  assert.ok(!ids({ source: ctx }).includes("MCP002"));
+});
+
+test("an unclassifiable Go requirement is not spent as a critical", () => {
+  // A `replace` to a fork and a `go get …@main` pseudo-version are routine, and
+  // both leave the requirement unreadable. MCP011 already stays quiet; MCP002's
+  // source arm was firing on the absence instead — on a `sessionId` tool
+  // argument, which is what MCP002's own fix recommends.
+  for (const version of ["v1.7.1-0.20260901120000-abcdef123456", "v1.7.0"]) {
+    const replaced = version === "v1.7.0";
+    const ctx: SourceContext = {
+      matches: { sessionId: [{ file: "main.go", line: 4, text: 'SessionID string `json:"sessionId"`' }] },
+      sdkVersion: null,
+      filesScanned: 1,
+      goManifests: ["go.mod"],
+      sdkDependencies: [
+        goSdkDep(GO_SDK, version, {
+          manifest: "go.mod",
+          ...(replaced ? { replaced: true, sdkLine: "unknown" as const } : {}),
+        }),
+      ],
+    };
+    assert.ok(
+      !ids({ source: ctx }).includes("MCP002"),
+      `MCP002 should stay quiet for ${replaced ? "a replaced module" : version}`,
+    );
+  }
 });
 
 test("MCP011 needs a checkout — a live probe cannot see go.mod", () => {

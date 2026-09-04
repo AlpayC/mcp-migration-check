@@ -835,7 +835,8 @@ function renderMarkdown({ probed, summary, entries, localOnly, startedAt, dateSt
   );
   out.push(
     "- **A live probe cannot see SDK dependency rules.** MCP007 reads a " +
-      "`package.json`; MCP009 reads Python project metadata or source. A probe " +
+      "`package.json`; MCP009 reads Python project metadata or source; " +
+      "MCP010 reads a `Cargo.toml`; MCP011 reads a `go.mod`. A probe " +
       "has neither.",
   );
   out.push(

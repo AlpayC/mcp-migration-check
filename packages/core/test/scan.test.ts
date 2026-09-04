@@ -768,3 +768,91 @@ test("parseGoMod unquotes module and version tokens", () => {
   assert.equal(deps[0].name, GO_SDK);
   assert.equal(deps[0].sdkLine, "legacy");
 });
+
+test("a `//` inside a string does not truncate the line", async () => {
+  // `indexOf("//")` deleted whatever followed a URL on the same line, which
+  // both invented a finding (a stateless server read as stateful) and hid one
+  // (a stateful server acquitted by moving a URL onto its transport line).
+  await withTempDir(async (dir) => {
+    await fs.writeFile(
+      path.join(dir, "main.go"),
+      'package p\nfunc r() { o := &mcp.StreamableHTTPOptions{Endpoint: "https://x/mcp", Stateless: true} }\n',
+    );
+    const r = await scanSource(dir);
+    assert.equal(r.matches.goStatelessOptIn.length, 1, "the opt-in survives the URL");
+    assert.equal(r.matches.goStreamableHttp.length, 1);
+  });
+
+  await withTempDir(async (dir) => {
+    await fs.writeFile(
+      path.join(dir, "main.go"),
+      'package p\nfunc r() { _ = "https://x/"; _ = mcp.NewStreamableHTTPHandler(g, &mcp.StreamableHTTPOptions{}) }\n',
+    );
+    const r = await scanSource(dir);
+    assert.equal(r.matches.goStreamableHttp.length, 1, "a URL must not hide the transport");
+    assert.equal(r.matches.goStatelessOptIn.length, 0);
+  });
+
+  await withTempDir(async (dir) => {
+    await fs.writeFile(path.join(dir, "main.go"), "package p\n// Stateless: true\n");
+    const r = await scanSource(dir);
+    assert.deepEqual(r.matches.goStatelessOptIn, [], "a real comment is still stripped");
+  });
+});
+
+test("an unqualified type named like the transport is not the transport", async () => {
+  await withTempDir(async (dir) => {
+    await fs.writeFile(
+      path.join(dir, "main.go"),
+      "package old\ntype StreamableHTTPServer struct{ addr string }\n",
+    );
+    const r = await scanSource(dir);
+    assert.deepEqual(r.matches.goStreamableHttp, []);
+  });
+});
+
+test("Go receivers that merely share a method name stay quiet", async () => {
+  // A Go LSP: `ws.AddRoots`, `ws.RemoveRoots`, and `server.WithLogging(logger)`
+  // where `server` is just what the variable is called. mcp-go's own
+  // `WithLogging()` and `WithRoots()` take no arguments, which is the guard.
+  await withTempDir(async (dir) => {
+    await fs.writeFile(
+      path.join(dir, "main.go"),
+      [
+        "package p",
+        "func run(ws *W, server *S, logger any) {",
+        '\tws.AddRoots([]string{"/src"})',
+        '\tws.RemoveRoots([]string{"/vendor"})',
+        "\tserver.WithLogging(logger)",
+        "}",
+      ].join("\n"),
+    );
+    const r = await scanSource(dir);
+    assert.deepEqual(r.matches.roots, []);
+    assert.deepEqual(r.matches.logging, []);
+  });
+});
+
+test("mcp-go's zero-argument options are still detected", async () => {
+  await withTempDir(async (dir) => {
+    await fs.writeFile(
+      path.join(dir, "main.go"),
+      'package p\nfunc r() { _ = server.NewMCPServer("n", "1", server.WithLogging(), server.WithRoots()) }\n',
+    );
+    const r = await scanSource(dir);
+    assert.equal(r.matches.logging.length, 1);
+    assert.equal(r.matches.roots.length, 1);
+  });
+});
+
+test("scanSource reports every go.mod it saw, not only those with an MCP module", async () => {
+  // Module ownership needs all of them: a nested module declaring no MCP SDK
+  // was invisible, and its files were attributed to the parent.
+  await withTempDir(async (dir) => {
+    await fs.mkdir(path.join(dir, "sub"), { recursive: true });
+    await fs.writeFile(path.join(dir, "go.mod"), `module a\nrequire ${GO_SDK} v1.7.0\n`);
+    await fs.writeFile(path.join(dir, "sub", "go.mod"), "module a/sub\ngo 1.25.0\n");
+    const r = await scanSource(dir);
+    assert.deepEqual([...(r.goManifests ?? [])].sort(), ["go.mod", "sub/go.mod"]);
+  });
+});

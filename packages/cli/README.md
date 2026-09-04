@@ -46,8 +46,9 @@ mcp-migration-check ... --json       Machine-readable output
 
 A source scan covers **TypeScript, Python, Rust, and Go** servers, reading
 `package.json`, Python project metadata, `Cargo.toml` and `go.mod` respectively
-for the SDK rules below. C# source is scanned for the language-neutral signals,
-but has no SDK rule yet. A live probe works against any server, in any language.
+for the SDK rules below. C# is not scanned at all — `.cs` files are not read —
+so probe those servers live instead. A live probe works against any server, in
+any language.
 
 Exit codes: `0` no critical findings · `1` at least one critical finding ·
 `2` inconclusive (unreachable, blocked, or nothing to scan). That makes it

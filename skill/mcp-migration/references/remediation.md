@@ -516,8 +516,10 @@ module proxy. The SDK crossed the protocol break *inside* its v1 line, at a
 minor. Every `import "github.com/modelcontextprotocol/go-sdk/mcp"` in your tree
 stays exactly as it is.
 
-Note the toolchain floor moves with it: go-sdk v1.7.0 requires `go 1.25.0`,
-mcp-go v1.0.0 requires `go 1.25.5`.
+Note what does *not* change: neither crossing moves the toolchain floor.
+go-sdk asks for `go 1.25.0` at both v1.6.1 and v1.7.0, and mcp-go asks for
+`go 1.25.5` at both v0.58.0 and v1.0.0 (read from the published `go.mod` of
+each, 2026-09-03). Do not plan a Go upgrade around this.
 
 ### Case 2 — the module is current, but the HTTP transport is not stateless
 
@@ -556,13 +558,15 @@ official SDK.
 
 ### What the rule deliberately will not tell you
 
-Three kinds of requirement are reported by nothing, because in each the version
+Four kinds of requirement are reported by nothing, because in each the version
 string does not describe what would actually build:
 
 - a module named by a `replace` directive — it may point at a fork or a local
   path with entirely different protocol support;
 - a pseudo-version such as `v1.6.2-0.20260801000000-abcdef123456` — it names a
   commit, not a release;
+- a `+incompatible` tag — it marks a module that never adopted module-aware
+  versioning, so the major says nothing about the protocol;
 - a `// indirect` requirement — the toolchain asserts nothing here imports it,
   so it is not this project's SDK choice and `go mod tidy` may rewrite it.
 

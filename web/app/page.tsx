@@ -102,8 +102,8 @@ const EXAMPLES: Array<{ label: string; url: string; auth: "open" | "oauth" }> =
 
 /**
  * Languages a source scan reads, each with the rule that checks its SDK
- * manifest. C# source is scanned for the language-neutral signals too, but no
- * rule covers its SDK yet.
+ * manifest. C# is absent because `.cs` is not scanned at all, so listing it
+ * would promise a check that does not happen.
  */
 const SOURCE_LANGUAGES = [
   { name: "TypeScript", rule: "MCP007" },
