@@ -3,6 +3,7 @@ import { test } from "node:test";
 
 import { evaluate, gradeFrom } from "../src/engine";
 import { rules, rulesVerifiedAt, SPEC_VERIFIED_AT } from "../src/rules";
+import { classifyGoSdkVersion } from "../src/scan";
 import type {
   ProbeContext,
   PythonSdkRequirement,
@@ -70,6 +71,8 @@ function source(signal: string, match: Partial<SourceMatch> = {}): SourceContext
     roots: [],
     pythonV1Sdk: [],
     pythonServerSdk: [],
+    goStreamableHttp: [],
+    goStatelessOptIn: [],
     modernEra: [],
   };
   return {
@@ -285,6 +288,50 @@ function withRustDeps(...deps: SdkDependency[]): SourceContext {
   return { matches: {}, sdkVersion: null, filesScanned: 1, sdkDependencies: deps };
 }
 
+const GO_SDK = "github.com/modelcontextprotocol/go-sdk";
+const MCP_GO = "github.com/mark3labs/mcp-go";
+
+function goSdkDep(
+  name: string,
+  constraint: string,
+  extra: Partial<SdkDependency> = {},
+): SdkDependency {
+  return {
+    ecosystem: "go",
+    name,
+    constraint,
+    manifest: "go.mod",
+    line: 5,
+    sdkLine: classifyGoSdkVersion(name, constraint),
+    ...extra,
+  };
+}
+
+/**
+ * A Go source context: module requirements plus whichever Go signals matched.
+ *
+ * The signals matter as much as the manifest here — MCP011's second hit is an
+ * argument from the absence of one of them, so a test that omits them is not
+ * testing the rule that ships.
+ */
+function withGoDeps(
+  deps: SdkDependency[],
+  signals: { streamableHttp?: boolean; statelessOptIn?: boolean } = {},
+): SourceContext {
+  const matches: Record<string, SourceMatch[]> = {};
+  if (signals.streamableHttp) {
+    matches.goStreamableHttp = [
+      { file: "main.go", line: 31, text: "handler := mcp.NewStreamableHTTPHandler(get, nil)" },
+    ];
+  }
+  if (signals.statelessOptIn) {
+    matches.goStatelessOptIn = [
+      { file: "main.go", line: 30, text: "opts := &mcp.StreamableHTTPOptions{Stateless: true}" },
+    ];
+  }
+  return { matches, sdkVersion: null, filesScanned: 1, sdkDependencies: deps };
+}
+
 function pythonRequirement(
   sdkLine: PythonSdkRequirement["sdkLine"],
   specifier: string,
@@ -297,6 +344,128 @@ function pythonRequirement(
     sdkLine,
   };
 }
+
+// ── MCP011 (Go) ─────────────────────────────────────────────────────────
+//
+// The threshold is the point of these. Go crossed the protocol break inside
+// its v1 line, so a major-version test — the shape MCP007/MCP009/MCP010 use —
+// would never fire. v1.6.1 must fire and v1.7.0 must not, and no assertion
+// here may be satisfiable by a major-only comparison.
+
+test("MCP011 fires on the official Go SDK below v1.7.0", () => {
+  for (const version of ["v1.0.0", "v1.4.1", "v1.6.0-pre.1", "v1.6.1"]) {
+    const ctx = withGoDeps([goSdkDep(GO_SDK, version)]);
+    const f = evaluate({ source: ctx }).find((x) => x.ruleId === "MCP011");
+    assert.ok(f, `MCP011 should fire for go-sdk ${version}`);
+    assert.ok(f.fix.includes("v1.7.0"), `fix should name v1.7.0 for ${version}`);
+  }
+});
+
+test("MCP011 stays quiet for the official Go SDK at v1.7.0 and later", () => {
+  // v1.7.0-pre.1 is the trap: strict semver sorts it below v1.7.0, but it is
+  // the release that shipped 2026-07-28 support and must not be flagged.
+  for (const version of ["v1.7.0-pre.1", "v1.7.0", "v1.8.0", "v2.0.0"]) {
+    const ctx = withGoDeps([goSdkDep(GO_SDK, version)]);
+    assert.ok(
+      !ids({ source: ctx }).includes("MCP011"),
+      `MCP011 should not fire for go-sdk ${version}`,
+    );
+  }
+});
+
+test("MCP011 fires on mark3labs/mcp-go below v1.0.0", () => {
+  for (const version of ["v0.32.0", "v0.58.0"]) {
+    const ctx = withGoDeps([goSdkDep(MCP_GO, version)]);
+    const f = evaluate({ source: ctx }).find((x) => x.ruleId === "MCP011");
+    assert.ok(f, `MCP011 should fire for mcp-go ${version}`);
+    assert.ok(f.fix.includes("v1.0.0"), `fix should name v1.0.0 for ${version}`);
+  }
+});
+
+test("MCP011 stays quiet for mark3labs/mcp-go at v1.0.0 and later", () => {
+  for (const version of ["v1.0.0-beta.1", "v1.0.0", "v1.2.0"]) {
+    const ctx = withGoDeps([goSdkDep(MCP_GO, version)]);
+    assert.ok(
+      !ids({ source: ctx }).includes("MCP011"),
+      `MCP011 should not fire for mcp-go ${version}`,
+    );
+  }
+});
+
+test("MCP011 never advises a v2 module path — Go has none", () => {
+  const ctx = withGoDeps([goSdkDep(GO_SDK, "v1.6.1")]);
+  const f = evaluate({ source: ctx }).find((x) => x.ruleId === "MCP011");
+  assert.ok(f);
+  assert.ok(!f.fix.includes("go-sdk/v2"), "there is no /v2 module path to migrate to");
+  assert.ok(f.fix.includes("module path does not change"));
+});
+
+test("MCP011 reports every affected module, not just the first", () => {
+  const ctx = withGoDeps([goSdkDep(GO_SDK, "v1.6.1"), goSdkDep(MCP_GO, "v0.58.0")]);
+  const f = evaluate({ source: ctx }).find((x) => x.ruleId === "MCP011");
+  assert.ok(f);
+  assert.ok(f.detail.includes(GO_SDK));
+  assert.ok(f.detail.includes(MCP_GO));
+});
+
+test("MCP011 ignores indirect and replaced requirements", () => {
+  // `// indirect` is not this project's SDK choice, and a `replace` means the
+  // required version is not what builds. Both must be silent in both
+  // directions: no finding, and no claim of modernity either.
+  for (const extra of [{ indirect: true }, { replaced: true, sdkLine: "unknown" as const }]) {
+    const ctx = withGoDeps([goSdkDep(GO_SDK, "v1.6.1", extra)]);
+    assert.ok(
+      !ids({ source: ctx }).includes("MCP011"),
+      `MCP011 should stay quiet for ${JSON.stringify(extra)}`,
+    );
+  }
+});
+
+test("MCP011 stays quiet on a version it cannot classify", () => {
+  for (const version of ["v0.0.0-20260801000000-abcdef123456", "v2.1.0+incompatible", "latest"]) {
+    const ctx = withGoDeps([goSdkDep(GO_SDK, version)]);
+    assert.ok(
+      !ids({ source: ctx }).includes("MCP011"),
+      `MCP011 should stay quiet for ${version}`,
+    );
+  }
+});
+
+test("MCP011 fires when a modern go-sdk serves HTTP without the stateless opt-in", () => {
+  const ctx = withGoDeps([goSdkDep(GO_SDK, "v1.7.0")], { streamableHttp: true });
+  const f = evaluate({ source: ctx }).find((x) => x.ruleId === "MCP011");
+  assert.ok(f, "an upgraded but stateful HTTP server still cannot serve the revision");
+  assert.ok(f.fix.includes("Stateless: true"));
+  assert.ok(f.detail.includes("main.go:31"), "should point at the transport it read");
+});
+
+test("MCP011 stays quiet when the stateless opt-in is present", () => {
+  const ctx = withGoDeps([goSdkDep(GO_SDK, "v1.7.0")], {
+    streamableHttp: true,
+    statelessOptIn: true,
+  });
+  assert.ok(!ids({ source: ctx }).includes("MCP011"));
+});
+
+test("MCP011 does not ask a stdio server for a flag it does not need", () => {
+  // stdio does not implement the version-restricting transport interface, so
+  // it serves the revision on the module version alone. The SDK's own headline
+  // example is a stdio server; flagging it would be a false positive on the
+  // most common shape there is.
+  const ctx = withGoDeps([goSdkDep(GO_SDK, "v1.7.0")]);
+  assert.ok(!ids({ source: ctx }).includes("MCP011"));
+});
+
+test("MCP011 does not apply the stateless requirement to mark3labs", () => {
+  // mcp-go advertises every version it implements by default, so a stateful
+  // HTTP server on v1.0.0 is not a defect. Only the official SDK gates.
+  const ctx = withGoDeps([goSdkDep(MCP_GO, "v1.0.0")], { streamableHttp: true });
+  assert.ok(!ids({ source: ctx }).includes("MCP011"));
+});
+
+test("MCP011 needs a checkout — a live probe cannot see go.mod", () => {
+  assert.ok(!ids({ live: legacyOnly() }).includes("MCP011"));
+});
 
 test("an info finding costs no points, so compatibility cannot lower a grade", () => {
   const clean = gradeFrom(evaluate({ live: dualEra() }));
@@ -566,7 +735,7 @@ test("protocol rules cite a spec subpage, never the bare revision root", () => {
 test("a fired finding always carries a fix and a spec reference", () => {
   const sourceContext = withSdk("^1.17.0");
   sourceContext.pythonSdkRequirements = [pythonRequirement("legacy", "<2")];
-  sourceContext.sdkDependencies = [rustSdkDep("rmcp", "2.0.0")];
+  sourceContext.sdkDependencies = [rustSdkDep("rmcp", "2.0.0"), goSdkDep(GO_SDK, "v1.6.1")];
   const everything = evaluate({
     live: legacyOnly({
       sessionIdOnModernRequest: true,
@@ -588,6 +757,7 @@ test("a fired finding always carries a fix and a spec reference", () => {
       "MCP007",
       "MCP009",
       "MCP010",
+      "MCP011",
     ],
     "every defect rule should fire on this context",
   );

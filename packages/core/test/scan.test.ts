@@ -1,10 +1,18 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
+import { execFileSync } from "node:child_process";
+import { promises as fs } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
 import {
+  classifyGoSdkVersion,
   classifyPythonSdkSpecifier,
   parseCargoToml,
+  parseGoMod,
   parsePythonSdkRequirements,
+  scanSource,
 } from "../src/scan";
 
 test("classifies only Python SDK constraints that force one major line", () => {
@@ -319,4 +327,254 @@ test("parseCargoToml does not let an unterminated table swallow later sections",
   const deps = parseCargoToml(content);
   assert.equal(deps.length, 1);
   assert.equal(deps[0].constraint, "1.2.0");
+});
+
+// ── classifyGoSdkVersion ────────────────────────────────────────────────
+//
+// Go crossed the protocol break at a MINOR: go-sdk v1.6.1 speaks 2025-11-25
+// and v1.7.0 speaks 2026-07-28, on one module path with no /v2. Every case
+// below is chosen so that a major-only comparison — the shape the TypeScript,
+// Python and Rust rules use — would get it wrong.
+
+const GO_SDK = "github.com/modelcontextprotocol/go-sdk";
+const MCP_GO = "github.com/mark3labs/mcp-go";
+
+test("classifies the official Go SDK on the v1.7.0 minor boundary", () => {
+  const cases: [string, string][] = [
+    ["v1.0.0", "legacy"],
+    ["v1.6.0", "legacy"],
+    ["v1.6.1", "legacy"],
+    ["v1.6.9", "legacy"],
+    // The pre-release of the crossing version already speaks the revision.
+    // Strict semver would sort it below v1.7.0 and call it legacy.
+    ["v1.7.0-pre.1", "modern"],
+    ["v1.7.0", "modern"],
+    ["v1.7.1", "modern"],
+    ["v1.8.0", "modern"],
+    ["v2.0.0", "modern"],
+  ];
+  for (const [version, expected] of cases) {
+    assert.equal(classifyGoSdkVersion(GO_SDK, version), expected, version);
+  }
+});
+
+test("classifies mark3labs/mcp-go on its own v1.0.0 boundary", () => {
+  const cases: [string, string][] = [
+    ["v0.16.1", "legacy"],
+    ["v0.58.0", "legacy"],
+    ["v1.0.0-beta.1", "modern"],
+    ["v1.0.0", "modern"],
+    ["v1.4.0", "modern"],
+  ];
+  for (const [version, expected] of cases) {
+    assert.equal(classifyGoSdkVersion(MCP_GO, version), expected, version);
+  }
+});
+
+test("a version that names a commit rather than a release is unknown", () => {
+  // A pseudo-version identifies a commit on some branch; nothing in the string
+  // says which protocol era that commit implements. Guessing costs a false
+  // positive, so these produce no finding at all.
+  for (const version of [
+    "v0.0.0-20260101120000-abcdef123456",
+    "v1.6.2-0.20260801000000-abcdef123456",
+    "v1.7.0-pre.1.0.20260801000000-abcdef123456",
+    "v2.1.0+incompatible",
+    "latest",
+    "",
+    "1.7.0",
+  ]) {
+    assert.equal(classifyGoSdkVersion(GO_SDK, version), "unknown", version);
+  }
+});
+
+test("an unrecognised module is unknown, whatever its version", () => {
+  for (const module of [
+    "github.com/metoro-io/mcp-golang",
+    "github.com/ThinkInAIXYZ/go-mcp",
+    "github.com/stretchr/testify",
+  ]) {
+    assert.equal(classifyGoSdkVersion(module, "v1.0.0"), "unknown", module);
+  }
+});
+
+// ── parseGoMod ──────────────────────────────────────────────────────────
+
+test("parseGoMod reads a single-line require", () => {
+  const deps = parseGoMod(
+    ["module example.com/srv", "", "go 1.25.0", "", `require ${GO_SDK} v1.6.1`].join("\n"),
+  );
+  assert.equal(deps.length, 1);
+  assert.equal(deps[0].ecosystem, "go");
+  assert.equal(deps[0].name, GO_SDK);
+  assert.equal(deps[0].constraint, "v1.6.1");
+  assert.equal(deps[0].manifest, "go.mod");
+  assert.equal(deps[0].sdkLine, "legacy");
+  assert.equal(deps[0].line, 5);
+});
+
+test("parseGoMod reads a require block and skips its blanks and comments", () => {
+  const deps = parseGoMod(
+    [
+      "require (",
+      "\t// the MCP server SDK",
+      "",
+      `\t${GO_SDK} v1.7.0`,
+      "\tgithub.com/google/go-cmp v0.7.0",
+      ")",
+    ].join("\n"),
+  );
+  assert.equal(deps.length, 1);
+  assert.equal(deps[0].constraint, "v1.7.0");
+  assert.equal(deps[0].sdkLine, "modern");
+});
+
+test("parseGoMod records an indirect requirement rather than dropping it", () => {
+  const deps = parseGoMod(["require (", `\t${MCP_GO} v0.58.0 // indirect`, ")"].join("\n"));
+  assert.equal(deps.length, 1);
+  assert.equal(deps[0].indirect, true);
+  // Still classified — the rule decides what to do with it, the parser reports.
+  assert.equal(deps[0].sdkLine, "legacy");
+});
+
+test("parseGoMod does not mistake a direct requirement for an indirect one", () => {
+  const deps = parseGoMod([`require ${GO_SDK} v1.6.1 // pinned, see #418`].join("\n"));
+  assert.equal(deps[0].indirect, undefined);
+});
+
+test("parseGoMod marks a replaced module unknown, in both directive forms", () => {
+  // A replace can redirect the build to a fork or a local directory whose
+  // protocol support the required version says nothing about. Reporting the
+  // required version would be a confident lie.
+  const single = parseGoMod(
+    [`require ${GO_SDK} v1.6.1`, `replace ${GO_SDK} => ../local-go-sdk`].join("\n"),
+  );
+  assert.equal(single[0].replaced, true);
+  assert.equal(single[0].sdkLine, "unknown");
+
+  const block = parseGoMod(
+    [
+      `require ${GO_SDK} v1.6.1`,
+      "replace (",
+      `\t${GO_SDK} v1.6.1 => github.com/acme/go-sdk v1.6.4`,
+      ")",
+    ].join("\n"),
+  );
+  assert.equal(block[0].replaced, true);
+  assert.equal(block[0].sdkLine, "unknown");
+});
+
+test("parseGoMod applies a replace declared after the require", () => {
+  const deps = parseGoMod(
+    [`require ${GO_SDK} v1.6.1`, "", `replace ${GO_SDK} => ./vendored`].join("\n"),
+  );
+  assert.equal(deps[0].replaced, true);
+});
+
+test("parseGoMod does not read exclude or retract as requirements", () => {
+  const deps = parseGoMod(
+    [
+      `exclude ${GO_SDK} v1.5.0`,
+      "retract (",
+      "\tv0.1.0",
+      ")",
+      "exclude (",
+      `\t${MCP_GO} v0.57.0`,
+      ")",
+    ].join("\n"),
+  );
+  assert.deepEqual(deps, []);
+});
+
+test("parseGoMod ignores module, go and toolchain directives", () => {
+  const deps = parseGoMod(
+    ["module github.com/acme/srv", "go 1.25.0", "toolchain go1.25.5"].join("\n"),
+  );
+  assert.deepEqual(deps, []);
+});
+
+test("parseGoMod ignores modules that are not MCP SDKs", () => {
+  const deps = parseGoMod(
+    [
+      "require (",
+      "\tgithub.com/metoro-io/mcp-golang v0.16.1",
+      "\tgithub.com/stretchr/testify v1.11.1",
+      ")",
+    ].join("\n"),
+  );
+  assert.deepEqual(deps, []);
+});
+
+test("parseGoMod handles Windows line endings", () => {
+  const deps = parseGoMod(`require (\r\n\t${GO_SDK} v1.6.1\r\n)\r\n`);
+  assert.equal(deps.length, 1);
+  assert.equal(deps[0].constraint, "v1.6.1");
+});
+
+test("parseGoMod returns empty for empty input", () => {
+  assert.deepEqual(parseGoMod(""), []);
+});
+
+test("parseGoMod reads both recognised modules from one manifest", () => {
+  const deps = parseGoMod(
+    ["require (", `\t${GO_SDK} v1.6.1`, `\t${MCP_GO} v0.58.0`, ")"].join("\n"),
+  );
+  assert.deepEqual(
+    deps.map((d) => d.name),
+    [GO_SDK, MCP_GO],
+  );
+});
+
+// ── the scan walk: what it must refuse to read ──────────────────────────
+
+async function withTempDir(run: (dir: string) => Promise<void>): Promise<void> {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "mcpcheck-scan-"));
+  try {
+    await run(dir);
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+}
+
+test("the scan does not follow a symlink out of the tree it was given", async () => {
+  // A symlink is neither a directory nor, to `!isDirectory()`, anything worth
+  // excluding — so `escape.go -> ../outside.txt` used to be read, and its lines
+  // were reported as `escape.go:2`. That attributes content from outside the
+  // repository to a path inside it.
+  await withTempDir(async (dir) => {
+    const repo = path.join(dir, "repo");
+    await fs.mkdir(repo);
+    await fs.writeFile(path.join(dir, "outside.txt"), "Mcp-Session-Id: leaked\n");
+    await fs.symlink(path.join("..", "outside.txt"), path.join(repo, "escape.go"));
+
+    const result = await scanSource(repo);
+    assert.equal(result.filesScanned, 0, "the symlinked file must not be read");
+    assert.deepEqual(result.matches.sessionId, []);
+  });
+});
+
+test("the scan is not hung by a fifo with a scannable name", async (t) => {
+  // A fifo reports size 0, so the size guard waves it through and the read then
+  // blocks until a writer appears. That hung `--source`, and therefore the
+  // GitHub Action, with no timeout above it to break the wait. The race below
+  // fails the test rather than hanging the suite if the guard regresses.
+  await withTempDir(async (dir) => {
+    const repo = path.join(dir, "repo");
+    await fs.mkdir(repo);
+    try {
+      execFileSync("mkfifo", [path.join(repo, "pipe.go")]);
+    } catch {
+      t.skip("mkfifo unavailable on this platform");
+      return;
+    }
+    await fs.writeFile(path.join(repo, "ok.go"), "package main\n");
+
+    const scanned = await Promise.race([
+      scanSource(repo).then((r) => r.filesScanned),
+      new Promise<number>((_, reject) =>
+        setTimeout(() => reject(new Error("scanSource blocked on the fifo")), 5000).unref(),
+      ),
+    ]);
+    assert.equal(scanned, 1, "only the regular file should be read");
+  });
 });

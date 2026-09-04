@@ -58,7 +58,7 @@ export interface CheckResult {
 export type ServerEra = "modern" | "legacy" | "dual" | "unknown";
 
 /** Package ecosystem that declared an MCP SDK dependency. */
-export type Ecosystem = "npm" | "cargo"; // extensible: "pypi" | "go" | "nuget"
+export type Ecosystem = "npm" | "cargo" | "go"; // extensible: "pypi" | "nuget"
 
 /**
  * Cargo section a dependency was declared under.
@@ -69,19 +69,50 @@ export type Ecosystem = "npm" | "cargo"; // extensible: "pypi" | "go" | "nuget"
  */
 export type CargoSection = "dependencies" | "dev-dependencies" | "workspace.dependencies";
 
+/**
+ * Which protocol era a Go module requirement resolves to.
+ *
+ * `unknown` is a first-class answer, not a failure. A `replace`d module, a
+ * pseudo-version and a `+incompatible` tag all name something whose protocol
+ * support the version string does not describe, and the house rule is to stay
+ * quiet rather than guess — see `classifyGoSdkVersion`.
+ */
+export type GoSdkLine = "legacy" | "modern" | "unknown";
+
 /** A single declared MCP SDK dependency, normalized across manifest kinds. */
 export interface SdkDependency {
   ecosystem: Ecosystem;
-  /** Package/crate name as declared, e.g. "@modelcontextprotocol/sdk" or "rmcp". */
+  /** Package/crate/module path as declared, e.g. "rmcp" or "github.com/mark3labs/mcp-go". */
   name: string;
-  /** Raw version constraint as written: "^1.17.0", "3", "3.1.4". */
+  /** Raw version constraint as written: "^1.17.0", "3", "3.1.4", "v1.6.1". */
   constraint: string;
   /** Manifest that declared it, relative to scan root — feeds Finding.location. */
-  manifest: string; // "package.json" | "Cargo.toml"
+  manifest: string; // "package.json" | "Cargo.toml" | "go.mod"
   /** Cargo feature flags, when the manifest expresses them. */
   features?: string[];
-  /** Cargo section it was declared under; absent for npm. */
+  /** Cargo section it was declared under; absent for npm and Go. */
   section?: CargoSection;
+  /** Line within `manifest`, so a Go finding can point at `go.mod:12`. */
+  line?: number;
+  /**
+   * Go: the requirement carried `// indirect`.
+   *
+   * Not the same as a Cargo dev-dependency, and the difference matters. `//
+   * indirect` is an assertion the toolchain maintains: no package in this
+   * module imports it. So it is not this project's SDK choice, it is a
+   * transitive pin — reporting it would tell a maintainer to change a line
+   * that `go mod tidy` will rewrite anyway.
+   */
+  indirect?: boolean;
+  /**
+   * Go: a `replace` directive redirects this module.
+   *
+   * `constraint` then describes something the build does not use, so the
+   * requirement is classified `unknown` and reported by nothing.
+   */
+  replaced?: boolean;
+  /** Go: which protocol era `constraint` resolves to. Absent for npm and Cargo. */
+  sdkLine?: GoSdkLine;
 }
 
 /** Normalized observations from probing a running MCP server over HTTP. */
@@ -156,7 +187,10 @@ export interface SourceContext {
   sdkVersion: string | null;
   /** Direct `mcp` dependencies found in Python project metadata. */
   pythonSdkRequirements?: PythonSdkRequirement[];
-  /** MCP SDK crates read from `Cargo.toml`; npm goes through `sdkVersion`. */
+  /**
+   * MCP SDK dependencies read from `Cargo.toml` and `go.mod`; npm goes through
+   * `sdkVersion` and Python through `pythonSdkRequirements`.
+   */
   sdkDependencies?: SdkDependency[];
   filesScanned: number;
 }

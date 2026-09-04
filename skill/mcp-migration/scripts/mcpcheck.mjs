@@ -20,7 +20,12 @@ var SPEC = {
   rustSdkReleases: "https://github.com/modelcontextprotocol/rust-sdk/releases",
   // Per-SDK authoritative references for MCP010 multi-crate coverage.
   towerMcp: "https://github.com/joshrotenberg/tower-mcp",
-  rustMcpSdk: "https://github.com/rust-mcp-stack/rust-mcp-sdk"
+  rustMcpSdk: "https://github.com/rust-mcp-stack/rust-mcp-sdk",
+  // Go's own story is not on the spec site either. The SDK announcement is the
+  // document that states both halves of it: which release speaks the revision,
+  // and that serving it over HTTP is a separate opt-in.
+  goSdk: "https://pkg.go.dev/github.com/modelcontextprotocol/go-sdk@v1.7.0/mcp",
+  markThreeLabsMcpGo: "https://pkg.go.dev/github.com/mark3labs/mcp-go@v1.0.0/mcp"
 };
 var SPEC_VERIFIED_AT = {
   [SPEC.transport]: "2026-08-23",
@@ -39,7 +44,12 @@ var SPEC_VERIFIED_AT = {
   [SPEC.rustSdk]: "2026-08-22",
   [SPEC.rustSdkReleases]: "2026-08-28",
   [SPEC.towerMcp]: "2026-08-28",
-  [SPEC.rustMcpSdk]: "2026-08-28"
+  [SPEC.rustMcpSdk]: "2026-08-28",
+  // Read against the module proxy and the module source on the same day: the
+  // package pages are version-pinned, so they cannot drift the way a moving
+  // `@latest` page would.
+  [SPEC.goSdk]: "2026-09-03",
+  [SPEC.markThreeLabsMcpGo]: "2026-09-03"
 };
 var rulesVerifiedAt = Object.values(SPEC_VERIFIED_AT).sort()[0];
 function firstMatch(ctx, signal) {
@@ -299,6 +309,50 @@ var rules = [
         specRef: hits.length === 1 ? hits[0].specRef : SPEC.rustSdk,
         references: [...new Set(hits.flatMap((h) => h.refs))],
         location: "Cargo.toml"
+      };
+    }
+  },
+  {
+    id: "MCP011",
+    title: "Go MCP SDK not serving the 2026-07-28 revision",
+    severity: "warning",
+    specRef: SPEC.sdk,
+    references: [SPEC.goSdk, SPEC.markThreeLabsMcpGo],
+    evaluate(ctx) {
+      const deps = (ctx.source?.sdkDependencies ?? []).filter((d) => d.ecosystem === "go");
+      if (deps.length === 0) return null;
+      const hits = [];
+      for (const dep of deps) {
+        if (dep.indirect || dep.replaced || dep.sdkLine === "unknown") continue;
+        if (dep.sdkLine === "legacy") {
+          const target = dep.name === "github.com/mark3labs/mcp-go" ? "v1.0.0" : "v1.7.0";
+          hits.push({
+            detail: `${dep.manifest} requires ${dep.name} ${dep.constraint}, which is below ${target} \u2014 the first release of that module speaking 2026-07-28.`,
+            fix: `Upgrade ${dep.name} to ${target} or later (\`go get ${dep.name}@${target}\`), then run your tests. The module path does not change: Go crossed the protocol break inside its existing major, so there is no v2 import path to rewrite.`
+          });
+        }
+      }
+      const modernOfficial = deps.find(
+        (d) => d.name === "github.com/modelcontextprotocol/go-sdk" && d.sdkLine === "modern" && !d.indirect && !d.replaced
+      );
+      const http = firstMatch(ctx, "goStreamableHttp");
+      const statelessOptIn = (ctx.source?.matches.goStatelessOptIn?.length ?? 0) > 0;
+      if (modernOfficial && http && !statelessOptIn) {
+        hits.push({
+          detail: `${modernOfficial.manifest} requires ${modernOfficial.name} ${modernOfficial.constraint}, which speaks 2026-07-28, but the streamable HTTP transport at ${http.file}:${http.line} is configured without \`Stateless\`. That transport serves the revision only when it is stateless; left as is, clients negotiate down to 2025-11-25.`,
+          fix: "Set `Stateless: true` in `StreamableHTTPOptions`, and move any per-session state onto explicit handles passed as tool arguments. Upgrading the module is not enough on its own \u2014 serving the revision over HTTP is a separate, deliberate choice. A stdio server needs no such flag."
+        });
+      }
+      if (hits.length === 0) return null;
+      return {
+        ruleId: "MCP011",
+        title: "Go MCP SDK not serving the 2026-07-28 revision",
+        severity: "warning",
+        detail: hits.map((h) => h.detail).join(" "),
+        fix: hits.map((h) => h.fix).join(" "),
+        specRef: SPEC.sdk,
+        references: [SPEC.goSdk, SPEC.markThreeLabsMcpGo],
+        location: deps[0].manifest
       };
     }
   },
@@ -677,14 +731,37 @@ var IGNORED_DIRS = /* @__PURE__ */ new Set([
   // Rust build and vendoring directories.
   "target",
   ".cargo",
-  "vendor"
+  // Go vendoring lives here too, and a vendored tree contains the SDK's own
+  // source — scanning it reports the SDK's compatibility code as the project's.
+  "vendor",
+  // Go module and build caches, when someone points GOPATH/GOMODCACHE inside
+  // the repository. Same reasoning as `.venv`.
+  ".gocache",
+  ".gomodcache"
 ]);
 var SIGNAL_PATTERNS = {
-  initialize: /InitializeRequest|oninitialized|on_initialized|notifications\/initialized|["']initialize["']|["']initialized["']/,
-  sessionId: /[Mm]cp-[Ss]ession-[Ii]d|mcpSessionId|mcp_session_id|get_session_id|session_id_generator|stateless_http\s*=\s*False|\bsessionId\b/,
-  logging: /["']logging["']|LoggingLevel|LoggingMessageNotification|send_log_message|\b(?:ctx|context)\.(?:debug|info|warning|error|critical|log)\s*\(|\blogging\b\s*:\s*\{/,
-  sampling: /["']sampling["']|createMessage|create_message|SamplingMessage|\bsampling\b\s*:\s*\{/,
-  roots: /["']roots["']|ListRootsRequest|RootsCapability|list_roots|\broots\b\s*:\s*\{/,
+  initialize: /InitializeRequest|oninitialized|on_initialized|notifications\/initialized|["']initialize["']|["']initialized["']|\bInitializedHandler\b|\bmcp\.Initialized(?:Params|Request)\b|\.InitializeParams\(\)|\b(?:Add|On)(?:Before|After)Initialize\b/,
+  sessionId: /[Mm]cp-[Ss]ession-[Ii]d|mcpSessionId|mcp_session_id|get_session_id|session_id_generator|stateless_http\s*=\s*False|\bsessionId\b|\bGetSessionID\s*[:=]|SessionIdManager|\bHeader(?:Key)?SessionID\b/,
+  logging: /["']logging["']|LoggingLevel|LoggingMessageNotification|send_log_message|\b(?:ctx|context)\.(?:debug|info|warning|error|critical|log)\s*\(|\blogging\b\s*:\s*\{|\bLoggingMessageParams\b|\bNewLoggingHandler\b|\bSendLogMessageToClient\b|\bserver\.WithLogging\s*\(/,
+  sampling: /["']sampling["']|createMessage|create_message|SamplingMessage|\bsampling\b\s*:\s*\{|\bCreateMessage(?:Params|Result|Request|Handler)\b|\b(?:EnableSampling|RequestSampling|WithSamplingHandler)\b/,
+  roots: /["']roots["']|ListRootsRequest|RootsCapability|list_roots|\broots\b\s*:\s*\{|\bListRoots(?:Params|Result)\b|\b(?:AddRoots|RemoveRoots|RequestRoots|WithRootsHandler)\b|\bserver\.WithRoots\s*\(/,
+  /**
+   * Go: a streamable-HTTP server is being configured.
+   *
+   * Only meaningful next to `goStatelessOptIn`. The official Go SDK refuses to
+   * serve `2026-07-28` over this transport unless it is stateless, so the pair
+   * "HTTP transport present, stateless opt-in absent" is what MCP011 reads. A
+   * stdio server matches neither and is modern on the SDK version alone.
+   */
+  goStreamableHttp: /\bStreamableHTTP(?:Handler|Options)\b|\bStreamableServerTransport\b|\bNewStreamableHTTPServer\b/,
+  /**
+   * Go: the stateless opt-in, in either SDK's spelling.
+   *
+   * NOT modern-era evidence on its own — `StreamableHTTPOptions.Stateless` has
+   * existed since go-sdk v1.3.1, long before the revision. It is only ever read
+   * as the absence-check above.
+   */
+  goStatelessOptIn: /\bStateless\s*:\s*true\b|\.Stateless\s*=\s*true\b|\bWithStateLess\s*\(|\bStatelessSessionIdManager\b/,
   /** The official Python SDK's v1 high-level server import. */
   pythonV1Sdk: /\bfrom\s+mcp\.server\.fastmcp(?:\.[A-Za-z_][\w.]*)?\s+import\b|\bimport\s+mcp\.server\.fastmcp\b/,
   /** Any official Python SDK server import; its major comes from metadata. */
@@ -697,12 +774,29 @@ var SIGNAL_PATTERNS = {
    * well-maintained ones — without something to weigh against `initialize`,
    * every dual-era codebase grades as if it had never migrated.
    *
-   * Deliberately narrow: the `io.modelcontextprotocol/` prefix and
-   * `server/discover` only exist in `2026-07-28`, so a match is hard evidence.
-   * A dependency on the v2 SDK packages counts too — that line has no legacy
-   * mode to be confused with.
+   * Deliberately narrow, and it must stay that way. The four `_meta` keys are
+   * ENUMERATED rather than matched by prefix, and the difference is load
+   * bearing: the *legacy* mark3labs SDK (mcp-go v0.58.0, `mcp/tasks.go`)
+   * already defines `io.modelcontextprotocol/related-task`. Loosening this to
+   * the bare prefix would read a legacy Go server as modern and silence MCP001
+   * on it. A dependency on the v2 npm packages counts too — that line has no
+   * legacy mode to be confused with.
+   *
+   * The Go alternatives are the exported names that appear only in the modern
+   * SDKs (`MetaKeyProtocolVersion…`, `ProtocolVersion20260728`,
+   * `mcp.DiscoverResult`, `subscriptions/listen`). The date literal must be
+   * QUOTED — a bare `2026-07-28` in a `// TODO: migrate` comment must not
+   * silence the checker. And note what is deliberately absent: no
+   * `protocolVersion2026…` pattern, because go-sdk v1.6.0/v1.6.1 declare an
+   * unused `protocolVersion20260630` and such a pattern would misfire on the
+   * legacy line.
+   *
+   * For Go this regex is the smaller half of the story. A modern Go server
+   * frequently spells nothing modern at all — the SDK answers `server/discover`
+   * internally — so `go.mod` carries the evidence instead. See the feed in
+   * `scanSource`.
    */
-  modernEra: /io\.modelcontextprotocol\/(protocolVersion|clientCapabilities|clientInfo|serverInfo)|["']server\/discover["']|@modelcontextprotocol\/(server|client|core)\b|\bfrom\s+mcp\.server\s+import\s+[^#\n]*\bMCPServer\b|\bfrom\s+mcp\.server\.mcpserver(?:\.[A-Za-z_][\w.]*)?\s+import\b/
+  modernEra: /io\.modelcontextprotocol\/(protocolVersion|clientCapabilities|clientInfo|serverInfo)|["']server\/discover["']|@modelcontextprotocol\/(server|client|core)\b|\bfrom\s+mcp\.server\s+import\s+[^#\n]*\bMCPServer\b|\bfrom\s+mcp\.server\.mcpserver(?:\.[A-Za-z_][\w.]*)?\s+import\b|\bMetaKey(?:ProtocolVersion|ClientInfo|ServerInfo|ClientCapabilities|SubscriptionID)\b|\bProtocolVersion20260728\b|\bmcp\.Discover(?:Params|Result)\b|["']subscriptions\/listen["']|["']2026-07-28["']/
 };
 async function scanSource(dir, opts = {}) {
   const maxFiles = opts.maxFiles ?? 5e3;
@@ -742,7 +836,22 @@ async function scanSource(dir, opts = {}) {
       text: req.requirement
     });
   }
-  return { matches, sdkVersion: pkg.sdkVersion, pythonSdkRequirements, filesScanned, sdkDependencies: await readCargoDependencies(dir) };
+  const sdkDependencies = [
+    ...await readCargoDependencies(dir),
+    ...await readGoModDependencies(dir, maxBytes, maxFiles)
+  ];
+  const goHttpWithoutStateless = matches.goStreamableHttp.length > 0 && matches.goStatelessOptIn.length === 0;
+  for (const dep of sdkDependencies) {
+    if (dep.ecosystem !== "go" || dep.sdkLine !== "modern") continue;
+    if (dep.indirect || dep.replaced) continue;
+    if (goHttpWithoutStateless) continue;
+    matches.modernEra.push({
+      file: dep.manifest,
+      line: dep.line ?? 0,
+      text: `${dep.name} ${dep.constraint}`
+    });
+  }
+  return { matches, sdkVersion: pkg.sdkVersion, pythonSdkRequirements, filesScanned, sdkDependencies };
 }
 function classifyPythonSdkSpecifier(specifier) {
   const value = specifier.trim().replace(/^(["'])(.*)\1$/, "$2").trim();
@@ -913,7 +1022,7 @@ function hasTomlArrayClose(line) {
   return false;
 }
 async function readPythonSdkRequirements(dir, maxBytes, maxFiles) {
-  const manifests = await collectPythonDependencyFiles(dir, maxFiles);
+  const manifests = await collectMatchingFiles(dir, isPythonDependencyFile, maxFiles);
   const found = [];
   for (const manifest of manifests) {
     const content = await readIfSmallEnough(manifest, maxBytes);
@@ -1044,11 +1153,103 @@ async function readCargoDependencies(dir) {
     return [];
   }
 }
+var MCP_GO_MODULES = {
+  "github.com/modelcontextprotocol/go-sdk": [1, 7, 0],
+  "github.com/mark3labs/mcp-go": [1, 0, 0]
+};
+var GO_PSEUDO_VERSION = /[-.]\d{14}-[0-9a-f]{12}$/;
+function classifyGoSdkVersion(module, version) {
+  const threshold = MCP_GO_MODULES[module];
+  if (!threshold) return "unknown";
+  const raw = version.trim();
+  if (!raw || raw.endsWith("+incompatible") || GO_PSEUDO_VERSION.test(raw)) return "unknown";
+  const parsed = raw.match(/^v(\d+)\.(\d+)\.(\d+)(?:-[0-9A-Za-z.-]+)?$/);
+  if (!parsed) return "unknown";
+  const triple = [Number(parsed[1]), Number(parsed[2]), Number(parsed[3])];
+  for (let i = 0; i < 3; i++) {
+    if (triple[i] !== threshold[i]) return triple[i] < threshold[i] ? "legacy" : "modern";
+  }
+  return "modern";
+}
+function stripGoComment(line) {
+  const at = line.indexOf("//");
+  if (at === -1) return { text: line.trim(), indirect: false };
+  return {
+    text: line.slice(0, at).trim(),
+    indirect: /(^|\s)indirect(\s|$)/.test(line.slice(at + 2))
+  };
+}
+function parseGoMod(content) {
+  const lines = content.split(/\r?\n/);
+  const deps = [];
+  const replaced = /* @__PURE__ */ new Set();
+  let block = null;
+  const noteReplace = (text) => {
+    const module = text.split(/\s+/)[0];
+    if (module) replaced.add(module);
+  };
+  const noteRequire = (text, lineNo, indirect) => {
+    const entry = text.match(/^(\S+)\s+(\S+)$/);
+    if (!entry) return;
+    const [, name, constraint] = entry;
+    if (!(name in MCP_GO_MODULES)) return;
+    deps.push({
+      ecosystem: "go",
+      name,
+      constraint,
+      manifest: "go.mod",
+      line: lineNo,
+      sdkLine: classifyGoSdkVersion(name, constraint),
+      ...indirect ? { indirect: true } : {}
+    });
+  };
+  for (let i = 0; i < lines.length; i++) {
+    const { text, indirect } = stripGoComment(lines[i]);
+    if (!text) continue;
+    if (block) {
+      if (text === ")") {
+        block = null;
+      } else if (block === "require") {
+        noteRequire(text, i + 1, indirect);
+      } else if (block === "replace") {
+        noteReplace(text);
+      }
+      continue;
+    }
+    const opened = text.match(/^(require|replace|exclude|retract)\s*\($/);
+    if (opened) {
+      block = opened[1];
+      continue;
+    }
+    const single = text.match(/^(require|replace|exclude|retract)\s+(.*)$/);
+    if (!single) continue;
+    if (single[1] === "require") noteRequire(single[2].trim(), i + 1, indirect);
+    else if (single[1] === "replace") noteReplace(single[2].trim());
+  }
+  for (const dep of deps) {
+    if (!replaced.has(dep.name)) continue;
+    dep.replaced = true;
+    dep.sdkLine = "unknown";
+  }
+  return deps;
+}
+async function readGoModDependencies(dir, maxBytes, maxFiles) {
+  const manifests = await collectMatchingFiles(dir, (name) => name === "go.mod", maxFiles);
+  const found = [];
+  for (const manifest of manifests) {
+    const content = await readIfSmallEnough(manifest, maxBytes);
+    if (content === null) continue;
+    const relative = path.relative(dir, manifest);
+    for (const dep of parseGoMod(content)) found.push({ ...dep, manifest: relative });
+  }
+  return found;
+}
 async function readIfSmallEnough(file, maxBytes) {
   let handle;
   try {
     handle = await fs.open(file, "r");
     const stat = await handle.stat();
+    if (!stat.isFile()) return null;
     if (stat.size > maxBytes) return null;
     return await handle.readFile("utf8");
   } catch {
@@ -1074,7 +1275,7 @@ async function collectFiles(dir, cap) {
       if (e.isDirectory()) {
         if (IGNORED_DIRS.has(e.name)) continue;
         await walk(full);
-      } else if (SCANNABLE.has(path.extname(e.name))) {
+      } else if (e.isFile() && SCANNABLE.has(path.extname(e.name))) {
         out.push(full);
       }
     }
@@ -1082,7 +1283,7 @@ async function collectFiles(dir, cap) {
   await walk(dir);
   return out;
 }
-async function collectPythonDependencyFiles(dir, cap) {
+async function collectMatchingFiles(dir, match, cap) {
   const out = [];
   async function walk(current) {
     if (out.length >= cap) return;
@@ -1098,7 +1299,7 @@ async function collectPythonDependencyFiles(dir, cap) {
       if (entry.isDirectory()) {
         if (IGNORED_DIRS.has(entry.name)) continue;
         await walk(full);
-      } else if (isPythonDependencyFile(entry.name)) {
+      } else if (entry.isFile() && match(entry.name)) {
         out.push(full);
       }
     }

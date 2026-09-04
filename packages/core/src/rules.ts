@@ -47,6 +47,11 @@ const SPEC = {
   // Per-SDK authoritative references for MCP010 multi-crate coverage.
   towerMcp: "https://github.com/joshrotenberg/tower-mcp",
   rustMcpSdk: "https://github.com/rust-mcp-stack/rust-mcp-sdk",
+  // Go's own story is not on the spec site either. The SDK announcement is the
+  // document that states both halves of it: which release speaks the revision,
+  // and that serving it over HTTP is a separate opt-in.
+  goSdk: "https://pkg.go.dev/github.com/modelcontextprotocol/go-sdk@v1.7.0/mcp",
+  markThreeLabsMcpGo: "https://pkg.go.dev/github.com/mark3labs/mcp-go@v1.0.0/mcp",
 } as const;
 
 /**
@@ -80,6 +85,11 @@ export const SPEC_VERIFIED_AT: Record<string, string> = {
   [SPEC.rustSdkReleases]: "2026-08-28",
   [SPEC.towerMcp]: "2026-08-28",
   [SPEC.rustMcpSdk]: "2026-08-28",
+  // Read against the module proxy and the module source on the same day: the
+  // package pages are version-pinned, so they cannot drift the way a moving
+  // `@latest` page would.
+  [SPEC.goSdk]: "2026-09-03",
+  [SPEC.markThreeLabsMcpGo]: "2026-09-03",
 };
 
 /** The oldest citation date — what a report should quote, not the newest. */
@@ -423,6 +433,81 @@ export const rules: Rule[] = [
         specRef: hits.length === 1 ? hits[0].specRef : SPEC.rustSdk,
         references: [...new Set(hits.flatMap((h) => h.refs))],
         location: "Cargo.toml",
+      };
+    },
+  },
+  {
+    id: "MCP011",
+    title: "Go MCP SDK not serving the 2026-07-28 revision",
+    severity: "warning",
+    specRef: SPEC.sdk,
+    references: [SPEC.goSdk, SPEC.markThreeLabsMcpGo],
+    evaluate(ctx): Finding | null {
+      const deps = (ctx.source?.sdkDependencies ?? []).filter((d) => d.ecosystem === "go");
+      if (deps.length === 0) return null;
+
+      // Every affected module is collected: reporting only the first hides the
+      // second until the first is fixed. Same shape as MCP010.
+      const hits: { detail: string; fix: string }[] = [];
+
+      for (const dep of deps) {
+        // An `// indirect` requirement is not this project's SDK choice — the
+        // toolchain asserts nothing here imports it — and a `replace`d one
+        // describes something the build does not use. Both are `unknown`, and
+        // `unknown` is reported by nothing.
+        if (dep.indirect || dep.replaced || dep.sdkLine === "unknown") continue;
+
+        if (dep.sdkLine === "legacy") {
+          const target =
+            dep.name === "github.com/mark3labs/mcp-go" ? "v1.0.0" : "v1.7.0";
+          hits.push({
+            detail: `${dep.manifest} requires ${dep.name} ${dep.constraint}, which is below ${target} — the first release of that module speaking 2026-07-28.`,
+            fix: `Upgrade ${dep.name} to ${target} or later (\`go get ${dep.name}@${target}\`), then run your tests. The module path does not change: Go crossed the protocol break inside its existing major, so there is no v2 import path to rewrite.`,
+          });
+        }
+      }
+
+      // The second defect, and the one a version check alone cannot see. The
+      // official SDK's streamable HTTP transport refuses the revision unless it
+      // is stateless — `SupportsProtocolVersion` returns `t.Stateless && …`,
+      // and the SDK announcement puts it plainly: "the streamable HTTP
+      // transport accepts 2026-07-28 only when you set
+      // StreamableHTTPOptions.Stateless = true. Leave it unset and clients
+      // negotiate down to 2025-11-25."
+      //
+      // Three conditions, all required, because this is an argument from
+      // absence and those are the ones that go wrong. It fires only for the
+      // official SDK (mark3labs advertises the revision by default), only when
+      // an HTTP transport is actually configured (a stdio server needs no flag
+      // and is the SDK's own headline example), and only when the opt-in
+      // appears nowhere in the scanned source — a whole-repository absence, not
+      // a missing token on one line.
+      const modernOfficial = deps.find(
+        (d) =>
+          d.name === "github.com/modelcontextprotocol/go-sdk" &&
+          d.sdkLine === "modern" &&
+          !d.indirect &&
+          !d.replaced,
+      );
+      const http = firstMatch(ctx, "goStreamableHttp");
+      const statelessOptIn = (ctx.source?.matches.goStatelessOptIn?.length ?? 0) > 0;
+      if (modernOfficial && http && !statelessOptIn) {
+        hits.push({
+          detail: `${modernOfficial.manifest} requires ${modernOfficial.name} ${modernOfficial.constraint}, which speaks 2026-07-28, but the streamable HTTP transport at ${http.file}:${http.line} is configured without \`Stateless\`. That transport serves the revision only when it is stateless; left as is, clients negotiate down to 2025-11-25.`,
+          fix: "Set `Stateless: true` in `StreamableHTTPOptions`, and move any per-session state onto explicit handles passed as tool arguments. Upgrading the module is not enough on its own — serving the revision over HTTP is a separate, deliberate choice. A stdio server needs no such flag.",
+        });
+      }
+
+      if (hits.length === 0) return null;
+      return {
+        ruleId: "MCP011",
+        title: "Go MCP SDK not serving the 2026-07-28 revision",
+        severity: "warning",
+        detail: hits.map((h) => h.detail).join(" "),
+        fix: hits.map((h) => h.fix).join(" "),
+        specRef: SPEC.sdk,
+        references: [SPEC.goSdk, SPEC.markThreeLabsMcpGo],
+        location: deps[0].manifest,
       };
     },
   },

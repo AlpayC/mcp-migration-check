@@ -53,6 +53,15 @@ const MARKERS = {
     "Tower-native Model Context Protocol",
   "https://github.com/rust-mcp-stack/rust-mcp-sdk":
     "high-performance, asynchronous Rust toolkit for building MCP",
+  // Version-pinned package pages, so the marker proves the CLAIM rather than
+  // merely proving the page exists: `DiscoverResult` is the modern surface and
+  // is absent from go-sdk v1.6.1, and `ProtocolVersion20260728` is the constant
+  // mark3labs added in v1.0.0. A page that stopped carrying either would mean
+  // MCP011's threshold needs re-reading.
+  "https://pkg.go.dev/github.com/modelcontextprotocol/go-sdk@v1.7.0/mcp":
+    "DiscoverResult",
+  "https://pkg.go.dev/github.com/mark3labs/mcp-go@v1.0.0/mcp":
+    "ProtocolVersion20260728",
 };
 
 const TIMEOUT_MS = 20_000;
