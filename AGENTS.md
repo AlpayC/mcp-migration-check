@@ -41,7 +41,7 @@ before writing a `fix` string. See the README section "A rule that was wrong".
 
 ```bash
 npm run typecheck    # core + tests + (separately) web
-npm test             # 213 assertions
+npm test             # 214 assertions
 npm run build:skill  # then check git status is clean
 ```
 

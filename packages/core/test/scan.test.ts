@@ -937,3 +937,19 @@ test("parseGoWorkReplacements reads both directive forms", () => {
   );
   assert.deepEqual(parseGoWorkReplacements("go 1.25.0\nuse ./svc\n"), []);
 });
+
+test("a replace can never mint modern-era evidence", async () => {
+  // `replace X => X v9.9.9` names a version that does not exist. It may silence
+  // MCP011 — every replace does, and that is documented — but it must not
+  // manufacture a counterweight and take MCP001 and MCP002 down with it.
+  await withTempDir(async (dir) => {
+    await fs.writeFile(
+      path.join(dir, "go.mod"),
+      `module m\ngo 1.25.0\nrequire ${GO_SDK} v1.6.1\nreplace ${GO_SDK} => ${GO_SDK} v9.9.9\n`,
+    );
+    await fs.writeFile(path.join(dir, "main.go"), "package main\n");
+    const r = await scanSource(dir);
+    assert.equal(r.sdkDependencies?.[0].replaced, true);
+    assert.deepEqual(r.matches.modernEra, [], "a forged version grants no credit");
+  });
+});

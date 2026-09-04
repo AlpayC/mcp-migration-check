@@ -338,6 +338,12 @@ export async function scanSource(
   // different question, and MCP011 is where it belongs.
   for (const dep of sdkDependencies) {
     if (dep.ecosystem !== "go" || dep.sdkLine !== "modern") continue;
+    // A `replace`d requirement never grants modern credit, even when its
+    // right-hand side is readable enough for MCP011 to judge. The asymmetry is
+    // deliberate: a fork's version number is a claim, not evidence, and
+    // `replace X => X v9.9.9` would otherwise mint a counterweight out of a
+    // version that does not exist and silence MCP001 and MCP002 with it. It can
+    // still make a requirement look *worse* — that direction costs nothing.
     if (dep.indirect || dep.replaced) continue;
     matches.modernEra.push({
       file: dep.manifest,

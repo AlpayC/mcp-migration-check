@@ -293,6 +293,13 @@ the absence of the modern surface is a defect.
   never resolves — but not for anything else. A clean MCP011 result
   therefore means no *classifiable* requirement is behind — a workspace or a
   replaced module can still be.
+- **Go comments and strings are scanned, not parsed.** The transport signals
+  skip `//` comments and string literals, including multi-line backtick
+  strings — a server's own `--stateless` help text should not be read as
+  configuration. The tracking is lexical, so a file that opens a backtick
+  string and never closes it hides the rest of itself from those two signals.
+  Such a file does not compile, so it cannot be a working server, but it can
+  suppress MCP011's second case in a scan.
 - **MCP011's second case argues from absence.** A modern `go-sdk` serving
   streamable HTTP is only flagged when the stateless opt-in appears *nowhere*
   in the module that declares the requirement. Test files (`*_test.go`) and
@@ -391,7 +398,7 @@ scripts/ecosystem-report.mjs registry-wide readiness snapshot
 ```
 
 ```bash
-npm test              # node --test via tsx; 213 assertions, no network
+npm test              # node --test via tsx; 214 assertions, no network
 npm run typecheck
 npm run build:bundles # regenerate both copies of the engine; CI fails if stale
 ```
