@@ -11,7 +11,7 @@ import {
   classifyPythonSdkSpecifier,
   parseCargoToml,
   parseGoMod,
-  parseGoWorkReplacements,
+  parseGoWork,
   parsePythonSdkRequirements,
   scanSource,
 } from "../src/scan";
@@ -926,16 +926,102 @@ test("a replace that names a module and a version is readable, not opaque", () =
   assert.equal(localPath[0].sdkLine, "unknown", "a local fork stays honestly unreadable");
 });
 
-test("parseGoWorkReplacements reads both directive forms", () => {
-  assert.deepEqual(
-    parseGoWorkReplacements(`go 1.25.0\nuse ./svc\nreplace ${GO_SDK} => ../fork\n`),
-    [GO_SDK],
+test("parseGoWork reads use and replace in both directive forms", () => {
+  const single = parseGoWork(`go 1.25.0\nuse ./svc\nreplace ${GO_SDK} => ../fork\n`);
+  assert.deepEqual(single.uses, ["./svc"]);
+  assert.equal(single.replacements.get(GO_SDK), null, "a local path stays unreadable");
+
+  const block = parseGoWork(
+    `use (\n\t./svc\n\t./lib\n)\nreplace (\n\t${GO_SDK} => ${GO_SDK} v1.6.1\n)\n`,
   );
-  assert.deepEqual(
-    parseGoWorkReplacements(`replace (\n\t${GO_SDK} => ../fork\n\tgithub.com/x/y => ../y\n)\n`),
-    [GO_SDK, "github.com/x/y"],
-  );
-  assert.deepEqual(parseGoWorkReplacements("go 1.25.0\nuse ./svc\n"), []);
+  assert.deepEqual(block.uses, ["./svc", "./lib"]);
+  assert.deepEqual(block.replacements.get(GO_SDK), { name: GO_SDK, version: "v1.6.1" });
+
+  const none = parseGoWork("go 1.25.0\nuse ./svc\n");
+  assert.equal(none.replacements.size, 0);
+});
+
+test("a go.work governs only the modules it uses", async () => {
+  // Applying every go.work to every go.mod reopened the laundering vector in a
+  // different file: five lines beside an unrelated playground module cleared
+  // findings off a legacy server two directories away.
+  await withTempDir(async (dir) => {
+    await fs.mkdir(path.join(dir, "legacy"), { recursive: true });
+    await fs.mkdir(path.join(dir, "playground"), { recursive: true });
+    await fs.writeFile(
+      path.join(dir, "legacy", "go.mod"),
+      `module m/legacy\ngo 1.25.0\nrequire ${GO_SDK} v1.6.1\n`,
+    );
+    await fs.writeFile(path.join(dir, "legacy", "main.go"), "package main\n");
+    await fs.writeFile(
+      path.join(dir, "playground", "go.mod"),
+      `module m/pg\ngo 1.25.0\nrequire ${GO_SDK} v1.7.0\n`,
+    );
+    await fs.writeFile(
+      path.join(dir, "playground", "go.work"),
+      `go 1.25.0\nuse .\nreplace ${GO_SDK} => ./fork\n`,
+    );
+    const r = await scanSource(dir);
+    const legacy = r.sdkDependencies?.find((d) => d.manifest === "legacy/go.mod");
+    assert.equal(legacy?.sdkLine, "legacy", "a sibling workspace has no authority here");
+    assert.equal(legacy?.replaced, undefined);
+    const pg = r.sdkDependencies?.find((d) => d.manifest === "playground/go.mod");
+    assert.equal(pg?.sdkLine, "unknown", "its own module is governed");
+  });
+});
+
+test("a go.work replacement naming a version is read like a go.mod one", async () => {
+  await withTempDir(async (dir) => {
+    await fs.writeFile(
+      path.join(dir, "go.mod"),
+      `module m\ngo 1.25.0\nrequire ${GO_SDK} v1.7.0\n`,
+    );
+    await fs.writeFile(path.join(dir, "main.go"), "package main\n");
+    await fs.writeFile(
+      path.join(dir, "go.work"),
+      `go 1.25.0\nuse .\nreplace ${GO_SDK} => ${GO_SDK} v1.6.1\n`,
+    );
+    const r = await scanSource(dir);
+    assert.equal(r.sdkDependencies?.[0].sdkLine, "legacy", "the workspace downgrades it");
+    assert.equal(r.sdkDependencies?.[0].constraint, "v1.6.1");
+  });
+});
+
+test("a block comment is not configuration, and a backtick in one is not a string", async () => {
+  // Both directions were reachable: a doc comment saying "production runs with
+  // Stateless: true; this build does not" acquitted the build that does not,
+  // and an odd backtick in a block comment opened a raw string that ran to end
+  // of file and blinded every line after it.
+  await withTempDir(async (dir) => {
+    await fs.writeFile(
+      path.join(dir, "main.go"),
+      [
+        "package main",
+        "/*",
+        "Production runs with Stateless: true; this build does not.",
+        "*/",
+        "func h() { _ = mcp.NewStreamableHTTPHandler(g, &mcp.StreamableHTTPOptions{}) }",
+      ].join("\n"),
+    );
+    const r = await scanSource(dir);
+    assert.deepEqual(r.matches.goStatelessOptIn, [], "a doc comment is not an opt-in");
+    assert.equal(r.matches.goStreamableHttp.length, 1);
+  });
+
+  await withTempDir(async (dir) => {
+    await fs.writeFile(
+      path.join(dir, "main.go"),
+      [
+        "package main",
+        "/*",
+        "Configure the handler with `mcp.StreamableHTTPOptions.",
+        "*/",
+        "func h() { _ = mcp.NewStreamableHTTPHandler(g, &mcp.StreamableHTTPOptions{}) }",
+      ].join("\n"),
+    );
+    const r = await scanSource(dir);
+    assert.equal(r.matches.goStreamableHttp.length, 1, "an odd backtick must not blind the file");
+  });
 });
 
 test("a replace can never mint modern-era evidence", async () => {

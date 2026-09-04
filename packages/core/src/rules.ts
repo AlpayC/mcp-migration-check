@@ -153,18 +153,95 @@ function dirOf(manifest: string): string {
   return p.includes("/") ? p.slice(0, p.lastIndexOf("/") + 1) : "";
 }
 
-/** Every `go.mod` the scan saw — not only those declaring a recognised SDK. */
-function goManifestsOf(ctx: RuleContext): string[] {
-  const declared = (ctx.source?.sdkDependencies ?? [])
-    .filter((d) => d.ecosystem === "go")
-    .map((d) => d.manifest);
-  return [...new Set([...(ctx.source?.goManifests ?? []), ...declared])];
+function isGoPath(file: string): boolean {
+  // Basename, not suffix: `endsWith("go.mod")` is also true of `cargo.mod`.
+  // Unreachable today, but this guard is load-bearing for three rules now and
+  // the next person to add a scannable extension should not have to know that.
+  const base = file.replace(/\\/g, "/").split("/").pop() ?? "";
+  return base.endsWith(".go") || base === "go.mod";
+}
+
+/**
+ * Per-evaluation index for the Go ownership questions.
+ *
+ * Built once and cached on the context. Without it, MCP002's search called
+ * `servesModern` per candidate, which resolved ownership per evidence item,
+ * and evidence grows with module count — 1500 modules took 28.8 seconds, on
+ * untrusted pull-request content in the Action.
+ */
+interface GoScope {
+  /** Module directories, longest first, so the first hit is the nearest. */
+  dirs: { dir: string; manifest: string }[];
+  owner: Map<string, string | null>;
+  /** Evidence from npm, Python or a non-Go source file. Repository-wide. */
+  hasNonGoEvidence: boolean;
+  /** Manifests whose own module carries Go evidence. */
+  goEvidenceOwners: Set<string>;
+  anyEvidence: boolean;
+}
+
+const goScopes = new WeakMap<object, GoScope>();
+
+function goScopeOf(ctx: RuleContext): GoScope {
+  const key = (ctx.source ?? ctx) as object;
+  const cached = goScopes.get(key);
+  if (cached) return cached;
+
+  const manifests = new Set<string>(ctx.source?.goManifests ?? []);
+  for (const dep of ctx.source?.sdkDependencies ?? []) {
+    if (dep.ecosystem === "go") manifests.add(dep.manifest);
+  }
+  const dirs = [...manifests]
+    .map((manifest) => ({ dir: dirOf(manifest), manifest }))
+    .sort((a, b) => b.dir.length - a.dir.length);
+
+  const scope: GoScope = {
+    dirs,
+    owner: new Map(),
+    hasNonGoEvidence: false,
+    goEvidenceOwners: new Set(),
+    anyEvidence: false,
+  };
+
+  const resolve = (file: string): string | null => {
+    const normalized = file.replace(/\\/g, "/");
+    for (const { dir, manifest } of scope.dirs) {
+      if (normalized.startsWith(dir)) return manifest;
+    }
+    return null;
+  };
+
+  for (const match of ctx.source?.matches.modernEra ?? []) {
+    scope.anyEvidence = true;
+    if (!isGoPath(match.file)) {
+      scope.hasNonGoEvidence = true;
+      continue;
+    }
+    const owner = resolve(match.file);
+    if (owner === null) scope.hasNonGoEvidence = true;
+    else scope.goEvidenceOwners.add(owner);
+  }
+
+  scope.owner = new Map();
+  goScopes.set(key, scope);
+  (scope as GoScope & { resolve: typeof resolve }).resolve = resolve;
+  return scope;
+}
+
+/** The `go.mod` whose directory most closely encloses `file`, if any. */
+function owningGoManifest(ctx: RuleContext, file: string): string | null {
+  const scope = goScopeOf(ctx) as GoScope & { resolve: (f: string) => string | null };
+  const cached = scope.owner.get(file);
+  if (cached !== undefined) return cached;
+  const owner = scope.resolve(file);
+  scope.owner.set(file, owner);
+  return owner;
 }
 
 function ownedBy(ctx: RuleContext, manifest: string): (match: SourceMatch) => boolean {
   const own = dirOf(manifest);
-  const deeper = goManifestsOf(ctx)
-    .map(dirOf)
+  const deeper = goScopeOf(ctx)
+    .dirs.map((d) => d.dir)
     .filter((dir) => dir !== own && dir.startsWith(own));
 
   return (match: SourceMatch) => {
@@ -174,34 +251,10 @@ function ownedBy(ctx: RuleContext, manifest: string): (match: SourceMatch) => bo
   };
 }
 
-/** The `go.mod` whose directory most closely encloses `file`, if any. */
-function owningGoManifest(ctx: RuleContext, file: string): string | null {
-  const normalized = file.replace(/\\/g, "/");
-  let best: string | null = null;
-  for (const manifest of goManifestsOf(ctx)) {
-    const dir = dirOf(manifest);
-    if (!normalized.startsWith(dir)) continue;
-    if (best === null || dir.length > dirOf(best).length) best = manifest;
-  }
-  return best;
-}
-
-/**
- * Does this target show any sign of serving the current revision?
- *
- * Live: the probe reached the modern surface. Source: the repository handles
- * per-request `_meta` or implements `server/discover`. A static scan cannot
- * prove a server works, but finding the modern machinery is enough to stop
- * calling the legacy path a defect — which is the failure this guards against.
- */
-function isGoPath(file: string): boolean {
-  return file.endsWith(".go") || file.endsWith("go.mod");
-}
-
 function servesModern(ctx: RuleContext, forFile?: string): boolean {
   if (ctx.live && (ctx.live.era === "modern" || ctx.live.era === "dual")) return true;
-  const evidence = ctx.source?.matches.modernEra ?? [];
-  if (evidence.length === 0) return false;
+  const scope = goScopeOf(ctx);
+  if (!scope.anyEvidence) return false;
   if (!forFile) return true;
 
   // Go evidence speaks for the module it came from, and for nothing else. A
@@ -209,25 +262,21 @@ function servesModern(ctx: RuleContext, forFile?: string): boolean {
   // beside it: this repository's own `go-notes-mcp` fixture, dropped next to a
   // single migrated `go.mod`, lost both of its criticals — 60 points.
   //
-  // Two boundaries, and the first is the one that bites hardest. A Go SDK
-  // version says nothing whatsoever about a Python or TypeScript server, yet
-  // `dirOf("go.mod")` is `""` and every path starts with `""` — so a Go module
-  // at the repository root "owned" `server.py` and `index.ts` too, and a
-  // polyglot repo with a Go tooling module acquitted its Python MCP server.
-  // Non-Go evidence — the npm v2 packages, a modern Python constraint — stays
-  // repository-wide as it always was.
+  // Two boundaries, and the first bites hardest. A Go SDK version says nothing
+  // whatsoever about a Python or TypeScript server, yet `dirOf("go.mod")` is
+  // `""` and every path starts with `""` — so a Go module at the repository
+  // root "owned" `server.py` and `index.ts`, and a polyglot repo with a Go
+  // tooling module acquitted its Python MCP server. Non-Go evidence — the npm
+  // v2 packages, a modern Python constraint — stays repository-wide as it was.
   //
-  // A `.go` file that sits above every `go.mod` belongs to no module, and no
-  // module's state can be inferred about it either way; it falls back to the
+  // A `.go` file above every `go.mod` belongs to no module, and no module's
+  // state can be inferred about it either way; it falls back to the
   // repository-wide answer rather than being denied evidence that exists.
-  const scoped = isGoPath(forFile);
-  const owner = scoped ? owningGoManifest(ctx, forFile) : null;
-  return evidence.some((match) => {
-    if (!isGoPath(match.file)) return true;
-    if (!scoped) return false;
-    if (owner === null) return true;
-    return owningGoManifest(ctx, match.file) === owner;
-  });
+  if (!isGoPath(forFile)) return scope.hasNonGoEvidence;
+  if (scope.hasNonGoEvidence) return true;
+  const owner = owningGoManifest(ctx, forFile);
+  if (owner === null) return true;
+  return scope.goEvidenceOwners.has(owner);
 }
 
 /**

@@ -178,32 +178,71 @@ const GO_TRANSPORT_PATTERNS: Record<string, RegExp> = {
  * genuine defect the other way. Go has three string forms and all three can
  * carry a `//`.
  */
-function stripGoLineComment(
+/** Lexer state that survives a line boundary in Go. */
+export interface GoLexState {
+  inRawString: boolean;
+  inBlockComment: boolean;
+}
+
+/**
+ * Return the code on this line, with comments and string contents removed.
+ *
+ * Two kinds of state cross a line boundary in Go — a backtick string and a
+ * `/* *\/` comment — and both mattered. Without raw-string state, a server's
+ * own `--stateless … Stateless: true` usage text acquitted the stateful server
+ * printing it. Without block-comment state it was worse in two ways: a doc
+ * comment saying "production runs with Stateless: true; this build does not"
+ * acquitted the build that does not, and an odd backtick anywhere in a block
+ * comment — quoting an identifier, say — opened a raw string that ran to end of
+ * file and blinded every line after it.
+ *
+ * Only the two transport signals use this. They are read as a pair, and an
+ * argument from absence is only as good as what it is allowed to look at.
+ */
+export function stripGoLineComment(
   line: string,
-  inRawString: boolean,
-): { code: string; inRawString: boolean } {
-  // A backtick string spans lines, so the scanner cannot start fresh on each
-  // one. Without the carried flag, a server's own `--stateless  configure the
-  // transport with Stateless: true` usage text was read as configuration and
-  // acquitted the stateful server printing it — the same failure as the
-  // `// TODO: set Stateless: true` comment, one string form further along.
+  state: GoLexState,
+): { code: string; state: GoLexState } {
+  let { inRawString, inBlockComment } = state;
   let quote: '"' | "'" | "`" | null = inRawString ? "`" : null;
+  let code = "";
+
   for (let i = 0; i < line.length; i++) {
     const ch = line[i];
+
+    if (inBlockComment) {
+      // Quotes are not tracked inside a comment — that is the whole point.
+      if (ch === "*" && line[i + 1] === "/") {
+        inBlockComment = false;
+        i++;
+      }
+      continue;
+    }
+
     if (quote) {
-      // Raw strings have no escapes; interpreted strings and runes do.
       if (ch === "\\" && quote !== "`") i++;
       else if (ch === quote) quote = null;
       continue;
     }
-    if (ch === '"' || ch === "'" || ch === "`") quote = ch;
-    else if (ch === "/" && line[i + 1] === "/") {
-      return { code: line.slice(0, i), inRawString: false };
+
+    if (ch === "/" && line[i + 1] === "/") break;
+    if (ch === "/" && line[i + 1] === "*") {
+      inBlockComment = true;
+      i++;
+      continue;
     }
+    if (ch === '"' || ch === "'" || ch === "`") {
+      quote = ch;
+      // Keep the opening delimiter: `Stateless: true` is matched on the code
+      // before the string, and dropping it would splice two tokens together.
+      code += ch;
+      continue;
+    }
+    code += ch;
   }
-  // Only a backtick can still be open at end of line; the other two forms
-  // cannot legally span one.
-  return { code: quote === "`" ? "" : line, inRawString: quote === "`" };
+
+  // Only a backtick can legally stay open across a line.
+  return { code, state: { inRawString: quote === "`", inBlockComment } };
 }
 
 export interface ScanOptions {
@@ -254,7 +293,7 @@ export async function scanSource(
 
     const applicable: Record<string, RegExp>[] = [SIGNAL_PATTERNS];
     if (isGo) applicable.push(GO_SIGNAL_PATTERNS);
-    let inRawString = false;
+    let lex: GoLexState = { inRawString: false, inBlockComment: false };
 
     const lines = content.split(/\r?\n/);
     for (let i = 0; i < lines.length; i++) {
@@ -275,8 +314,8 @@ export async function scanSource(
       }
 
       if (!isGo || isGoTest) continue;
-      const stripped = stripGoLineComment(line, inRawString);
-      inRawString = stripped.inRawString;
+      const stripped = stripGoLineComment(line, lex);
+      lex = stripped.state;
       for (const [signal, re] of Object.entries(GO_TRANSPORT_PATTERNS)) {
         if (!re.test(stripped.code)) continue;
         // These two are only ever asked "does any match belong to module M",
@@ -923,34 +962,72 @@ function stripGoComment(line: string): { text: string; indirect: boolean } {
  * required version says nothing about, so a replaced module is reported by
  * nothing at all rather than reported wrongly.
  */
+/** What a `go.work` says: which modules it governs, and what it replaces. */
+export interface GoWorkspace {
+  /** `use` paths, relative to the `go.work`'s own directory. */
+  uses: string[];
+  /** Replaced module -> its readable replacement, or null when unreadable. */
+  replacements: Map<string, { name: string; version: string } | null>;
+}
+
 /**
- * Module paths replaced by a `go.work` file.
+ * Parse the `use` and `replace` directives of a `go.work`.
  *
- * A workspace `replace` overrides the module-level one for the entire build,
- * so ignoring it produced exactly the confident lie `parseGoMod`'s own handling
- * exists to prevent: the same directive, moved from `go.mod` into `go.work`,
- * flipped a module from honest silence to a finding naming a version the
- * workspace never resolves.
+ * A workspace `replace` overrides the module-level one for the build, so
+ * ignoring it produced exactly the confident lie `parseGoMod`'s own handling
+ * exists to prevent. But it governs only the modules it `use`s — and applying
+ * every `go.work` in a repository to every `go.mod` in it reopened the
+ * laundering vector in a different file: one five-line `go.work` beside an
+ * unrelated playground module cleared MCP002 and MCP011 off a legacy server
+ * two directories away.
  */
-export function parseGoWorkReplacements(content: string): string[] {
-  const replaced: string[] = [];
-  let inBlock = false;
+export function parseGoWork(content: string): GoWorkspace {
+  const uses: string[] = [];
+  const replacements = new Map<string, { name: string; version: string } | null>();
+  const unquote = (token: string) => token.replace(/^"(.*)"$/, "$1");
+
+  let block: "use" | "replace" | null = null;
+  const noteUse = (text: string) => {
+    const value = unquote(text.trim().split(/\s+/)[0] ?? "");
+    if (value) uses.push(value);
+  };
+  const noteReplace = (text: string) => {
+    const module = unquote(text.split(/\s+/)[0] ?? "");
+    if (!module) return;
+    const arrow = text.indexOf("=>");
+    if (arrow !== -1) {
+      const rhs = text.slice(arrow + 2).trim().split(/\s+/).map(unquote);
+      // Same reading as in `go.mod`: a right-hand side naming a module and a
+      // version is readable, and the identical line must not mean two
+      // different things depending on which file it sits in.
+      if (rhs.length === 2 && /^v\d/.test(rhs[1])) {
+        replacements.set(module, { name: rhs[0], version: rhs[1] });
+        return;
+      }
+    }
+    replacements.set(module, null);
+  };
+
   for (const raw of content.split(/\r?\n/)) {
     const { text } = stripGoComment(raw);
     if (!text) continue;
-    if (inBlock) {
-      if (text === ")") inBlock = false;
-      else replaced.push(text.split(/\s+/)[0].replace(/^"(.*)"$/, "$1"));
+    if (block) {
+      if (text === ")") block = null;
+      else if (block === "use") noteUse(text);
+      else noteReplace(text);
       continue;
     }
-    if (/^replace\s*\($/.test(text)) {
-      inBlock = true;
+    const opened = text.match(/^(use|replace)\s*\($/);
+    if (opened) {
+      block = opened[1] as "use" | "replace";
       continue;
     }
-    const single = text.match(/^replace\s+(.*)$/);
-    if (single) replaced.push(single[1].trim().split(/\s+/)[0].replace(/^"(.*)"$/, "$1"));
+    const single = text.match(/^(use|replace)\s+(.*)$/);
+    if (!single) continue;
+    if (single[1] === "use") noteUse(single[2]);
+    else noteReplace(single[2].trim());
   }
-  return replaced.filter(Boolean);
+  return { uses, replacements };
 }
 
 export function parseGoMod(content: string): SdkDependency[] {
@@ -1066,11 +1143,30 @@ async function readGoModDependencies(
   maxFiles: number,
 ): Promise<{ deps: SdkDependency[]; manifests: string[] }> {
   const files = await collectMatchingFiles(dir, (name) => name === "go.mod", maxFiles);
+  // A `go.work` governs the modules its `use` directives name, resolved
+  // against its own directory — and nothing else. Keyed by the `go.mod` path
+  // each `use` resolves to, so a workspace cannot reach a module it does not
+  // claim, or one above itself.
   const workFiles = await collectMatchingFiles(dir, (name) => name === "go.work", maxFiles);
-  const workReplaced = new Set<string>();
+  const governed = new Map<string, Map<string, { name: string; version: string } | null>>();
   for (const workFile of workFiles) {
     const content = await readIfSmallEnough(workFile, maxBytes);
-    if (content !== null) for (const m of parseGoWorkReplacements(content)) workReplaced.add(m);
+    if (content === null) continue;
+    const work = parseGoWork(content);
+    if (work.replacements.size === 0) continue;
+    const workDir = path.dirname(workFile);
+    for (const use of work.uses) {
+      const manifest = path
+        .relative(dir, path.resolve(workDir, use, "go.mod"))
+        .split(path.sep)
+        .join("/");
+      // `path.relative` escaping upward means the module is outside the scan
+      // root, so nothing here can be governed by it.
+      if (manifest.startsWith("../")) continue;
+      const existing = governed.get(manifest);
+      if (existing) for (const [k, v] of work.replacements) existing.set(k, v);
+      else governed.set(manifest, new Map(work.replacements));
+    }
   }
 
   const deps: SdkDependency[] = [];
@@ -1083,11 +1179,22 @@ async function readGoModDependencies(
     // which silently collapsed every module's directory to the repository root.
     const relative = path.relative(dir, file).split(path.sep).join("/");
     manifests.push(relative);
+    const workspace = governed.get(relative);
     for (const dep of parseGoMod(content)) {
-      // A workspace replacement wins over whatever the module file says.
-      const overridden = workReplaced.has(dep.name)
-        ? { replaced: true, sdkLine: "unknown" as const }
-        : {};
+      // A workspace replacement wins over whatever the module file says — and
+      // is read the same way, so the identical directive means the same thing
+      // wherever it is written.
+      let overridden = {};
+      if (workspace?.has(dep.name)) {
+        const to = workspace.get(dep.name);
+        overridden = to
+          ? {
+              replaced: true,
+              constraint: to.version,
+              sdkLine: classifyGoSdkVersion(to.name, to.version),
+            }
+          : { replaced: true, sdkLine: "unknown" as const };
+      }
       deps.push({ ...dep, manifest: relative, ...overridden });
     }
   }

@@ -75,45 +75,76 @@ function dirOf(manifest) {
   const p = manifest.replace(/\\/g, "/");
   return p.includes("/") ? p.slice(0, p.lastIndexOf("/") + 1) : "";
 }
-function goManifestsOf(ctx) {
-  const declared = (ctx.source?.sdkDependencies ?? []).filter((d) => d.ecosystem === "go").map((d) => d.manifest);
-  return [.../* @__PURE__ */ new Set([...ctx.source?.goManifests ?? [], ...declared])];
+function isGoPath(file) {
+  const base = file.replace(/\\/g, "/").split("/").pop() ?? "";
+  return base.endsWith(".go") || base === "go.mod";
+}
+var goScopes = /* @__PURE__ */ new WeakMap();
+function goScopeOf(ctx) {
+  const key = ctx.source ?? ctx;
+  const cached = goScopes.get(key);
+  if (cached) return cached;
+  const manifests = new Set(ctx.source?.goManifests ?? []);
+  for (const dep of ctx.source?.sdkDependencies ?? []) {
+    if (dep.ecosystem === "go") manifests.add(dep.manifest);
+  }
+  const dirs = [...manifests].map((manifest) => ({ dir: dirOf(manifest), manifest })).sort((a, b) => b.dir.length - a.dir.length);
+  const scope = {
+    dirs,
+    owner: /* @__PURE__ */ new Map(),
+    hasNonGoEvidence: false,
+    goEvidenceOwners: /* @__PURE__ */ new Set(),
+    anyEvidence: false
+  };
+  const resolve = (file) => {
+    const normalized = file.replace(/\\/g, "/");
+    for (const { dir, manifest } of scope.dirs) {
+      if (normalized.startsWith(dir)) return manifest;
+    }
+    return null;
+  };
+  for (const match of ctx.source?.matches.modernEra ?? []) {
+    scope.anyEvidence = true;
+    if (!isGoPath(match.file)) {
+      scope.hasNonGoEvidence = true;
+      continue;
+    }
+    const owner = resolve(match.file);
+    if (owner === null) scope.hasNonGoEvidence = true;
+    else scope.goEvidenceOwners.add(owner);
+  }
+  scope.owner = /* @__PURE__ */ new Map();
+  goScopes.set(key, scope);
+  scope.resolve = resolve;
+  return scope;
+}
+function owningGoManifest(ctx, file) {
+  const scope = goScopeOf(ctx);
+  const cached = scope.owner.get(file);
+  if (cached !== void 0) return cached;
+  const owner = scope.resolve(file);
+  scope.owner.set(file, owner);
+  return owner;
 }
 function ownedBy(ctx, manifest) {
   const own = dirOf(manifest);
-  const deeper = goManifestsOf(ctx).map(dirOf).filter((dir) => dir !== own && dir.startsWith(own));
+  const deeper = goScopeOf(ctx).dirs.map((d) => d.dir).filter((dir) => dir !== own && dir.startsWith(own));
   return (match) => {
     const file = match.file.replace(/\\/g, "/");
     if (!file.startsWith(own)) return false;
     return !deeper.some((dir) => file.startsWith(dir));
   };
 }
-function owningGoManifest(ctx, file) {
-  const normalized = file.replace(/\\/g, "/");
-  let best = null;
-  for (const manifest of goManifestsOf(ctx)) {
-    const dir = dirOf(manifest);
-    if (!normalized.startsWith(dir)) continue;
-    if (best === null || dir.length > dirOf(best).length) best = manifest;
-  }
-  return best;
-}
-function isGoPath(file) {
-  return file.endsWith(".go") || file.endsWith("go.mod");
-}
 function servesModern(ctx, forFile) {
   if (ctx.live && (ctx.live.era === "modern" || ctx.live.era === "dual")) return true;
-  const evidence = ctx.source?.matches.modernEra ?? [];
-  if (evidence.length === 0) return false;
+  const scope = goScopeOf(ctx);
+  if (!scope.anyEvidence) return false;
   if (!forFile) return true;
-  const scoped = isGoPath(forFile);
-  const owner = scoped ? owningGoManifest(ctx, forFile) : null;
-  return evidence.some((match) => {
-    if (!isGoPath(match.file)) return true;
-    if (!scoped) return false;
-    if (owner === null) return true;
-    return owningGoManifest(ctx, match.file) === owner;
-  });
+  if (!isGoPath(forFile)) return scope.hasNonGoEvidence;
+  if (scope.hasNonGoEvidence) return true;
+  const owner = owningGoManifest(ctx, forFile);
+  if (owner === null) return true;
+  return scope.goEvidenceOwners.has(owner);
 }
 function versionsClause(ctx) {
   const v = ctx.live?.supportedVersions ?? [];
@@ -861,21 +892,38 @@ var GO_TRANSPORT_PATTERNS = {
   // `false` is an explicit declaration of statefulness, not an opt-in.
   goStatelessOptIn: /\bStateless\s*:\s*true\b|\.Stateless\s*=\s*true\b|\bWithStateLess\s*\(\s*true\s*\)|\bStatelessSessionIdManager\b/
 };
-function stripGoLineComment(line, inRawString) {
+function stripGoLineComment(line, state) {
+  let { inRawString, inBlockComment } = state;
   let quote = inRawString ? "`" : null;
+  let code = "";
   for (let i = 0; i < line.length; i++) {
     const ch = line[i];
+    if (inBlockComment) {
+      if (ch === "*" && line[i + 1] === "/") {
+        inBlockComment = false;
+        i++;
+      }
+      continue;
+    }
     if (quote) {
       if (ch === "\\" && quote !== "`") i++;
       else if (ch === quote) quote = null;
       continue;
     }
-    if (ch === '"' || ch === "'" || ch === "`") quote = ch;
-    else if (ch === "/" && line[i + 1] === "/") {
-      return { code: line.slice(0, i), inRawString: false };
+    if (ch === "/" && line[i + 1] === "/") break;
+    if (ch === "/" && line[i + 1] === "*") {
+      inBlockComment = true;
+      i++;
+      continue;
     }
+    if (ch === '"' || ch === "'" || ch === "`") {
+      quote = ch;
+      code += ch;
+      continue;
+    }
+    code += ch;
   }
-  return { code: quote === "`" ? "" : line, inRawString: quote === "`" };
+  return { code, state: { inRawString: quote === "`", inBlockComment } };
 }
 async function scanSource(dir, opts = {}) {
   const maxFiles = opts.maxFiles ?? 5e3;
@@ -897,7 +945,7 @@ async function scanSource(dir, opts = {}) {
     const isGoTest = isGo && file.endsWith("_test.go");
     const applicable = [SIGNAL_PATTERNS];
     if (isGo) applicable.push(GO_SIGNAL_PATTERNS);
-    let inRawString = false;
+    let lex = { inRawString: false, inBlockComment: false };
     const lines = content.split(/\r?\n/);
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
@@ -915,8 +963,8 @@ async function scanSource(dir, opts = {}) {
         }
       }
       if (!isGo || isGoTest) continue;
-      const stripped = stripGoLineComment(line, inRawString);
-      inRawString = stripped.inRawString;
+      const stripped = stripGoLineComment(line, lex);
+      lex = stripped.state;
       for (const [signal, re] of Object.entries(GO_TRANSPORT_PATTERNS)) {
         if (!re.test(stripped.code)) continue;
         const dir2 = relative.includes("/") ? relative.slice(0, relative.lastIndexOf("/") + 1) : "";
@@ -1284,25 +1332,48 @@ function stripGoComment(line) {
     indirect: first === "indirect" || first === "indirect;"
   };
 }
-function parseGoWorkReplacements(content) {
-  const replaced = [];
-  let inBlock = false;
+function parseGoWork(content) {
+  const uses = [];
+  const replacements = /* @__PURE__ */ new Map();
+  const unquote = (token) => token.replace(/^"(.*)"$/, "$1");
+  let block = null;
+  const noteUse = (text) => {
+    const value = unquote(text.trim().split(/\s+/)[0] ?? "");
+    if (value) uses.push(value);
+  };
+  const noteReplace = (text) => {
+    const module = unquote(text.split(/\s+/)[0] ?? "");
+    if (!module) return;
+    const arrow = text.indexOf("=>");
+    if (arrow !== -1) {
+      const rhs = text.slice(arrow + 2).trim().split(/\s+/).map(unquote);
+      if (rhs.length === 2 && /^v\d/.test(rhs[1])) {
+        replacements.set(module, { name: rhs[0], version: rhs[1] });
+        return;
+      }
+    }
+    replacements.set(module, null);
+  };
   for (const raw of content.split(/\r?\n/)) {
     const { text } = stripGoComment(raw);
     if (!text) continue;
-    if (inBlock) {
-      if (text === ")") inBlock = false;
-      else replaced.push(text.split(/\s+/)[0].replace(/^"(.*)"$/, "$1"));
+    if (block) {
+      if (text === ")") block = null;
+      else if (block === "use") noteUse(text);
+      else noteReplace(text);
       continue;
     }
-    if (/^replace\s*\($/.test(text)) {
-      inBlock = true;
+    const opened = text.match(/^(use|replace)\s*\($/);
+    if (opened) {
+      block = opened[1];
       continue;
     }
-    const single = text.match(/^replace\s+(.*)$/);
-    if (single) replaced.push(single[1].trim().split(/\s+/)[0].replace(/^"(.*)"$/, "$1"));
+    const single = text.match(/^(use|replace)\s+(.*)$/);
+    if (!single) continue;
+    if (single[1] === "use") noteUse(single[2]);
+    else noteReplace(single[2].trim());
   }
-  return replaced.filter(Boolean);
+  return { uses, replacements };
 }
 function parseGoMod(content) {
   const lines = content.split(/\r?\n/);
@@ -1381,10 +1452,20 @@ function parseGoMod(content) {
 async function readGoModDependencies(dir, maxBytes, maxFiles) {
   const files = await collectMatchingFiles(dir, (name) => name === "go.mod", maxFiles);
   const workFiles = await collectMatchingFiles(dir, (name) => name === "go.work", maxFiles);
-  const workReplaced = /* @__PURE__ */ new Set();
+  const governed = /* @__PURE__ */ new Map();
   for (const workFile of workFiles) {
     const content = await readIfSmallEnough(workFile, maxBytes);
-    if (content !== null) for (const m of parseGoWorkReplacements(content)) workReplaced.add(m);
+    if (content === null) continue;
+    const work = parseGoWork(content);
+    if (work.replacements.size === 0) continue;
+    const workDir = path.dirname(workFile);
+    for (const use of work.uses) {
+      const manifest = path.relative(dir, path.resolve(workDir, use, "go.mod")).split(path.sep).join("/");
+      if (manifest.startsWith("../")) continue;
+      const existing = governed.get(manifest);
+      if (existing) for (const [k, v] of work.replacements) existing.set(k, v);
+      else governed.set(manifest, new Map(work.replacements));
+    }
   }
   const deps = [];
   const manifests = [];
@@ -1393,8 +1474,17 @@ async function readGoModDependencies(dir, maxBytes, maxFiles) {
     if (content === null) continue;
     const relative = path.relative(dir, file).split(path.sep).join("/");
     manifests.push(relative);
+    const workspace = governed.get(relative);
     for (const dep of parseGoMod(content)) {
-      const overridden = workReplaced.has(dep.name) ? { replaced: true, sdkLine: "unknown" } : {};
+      let overridden = {};
+      if (workspace?.has(dep.name)) {
+        const to = workspace.get(dep.name);
+        overridden = to ? {
+          replaced: true,
+          constraint: to.version,
+          sdkLine: classifyGoSdkVersion(to.name, to.version)
+        } : { replaced: true, sdkLine: "unknown" };
+      }
       deps.push({ ...dep, manifest: relative, ...overridden });
     }
   }

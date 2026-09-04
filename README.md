@@ -290,7 +290,8 @@ the absence of the modern surface is a defect.
   `// indirect` (which the toolchain maintains to mean nothing here imports it).
   `go.work` is read for `replace` directives only — a workspace replacement
   overrides the module-level one, so ignoring it reported versions the build
-  never resolves — but not for anything else. A clean MCP011 result
+  never resolves — but not for anything else. A workspace governs only the
+  modules its `use` directives name, resolved against its own directory. A clean MCP011 result
   therefore means no *classifiable* requirement is behind — a workspace or a
   replaced module can still be.
 - **Go comments and strings are scanned, not parsed.** The transport signals
@@ -299,7 +300,9 @@ the absence of the modern surface is a defect.
   configuration. The tracking is lexical, so a file that opens a backtick
   string and never closes it hides the rest of itself from those two signals.
   Such a file does not compile, so it cannot be a working server, but it can
-  suppress MCP011's second case in a scan.
+  suppress MCP011's second case in a scan. `/* … */` comments are tracked too,
+  so neither a doc comment describing the flag nor a backtick quoted inside one
+  is read as code.
 - **MCP011's second case argues from absence.** A modern `go-sdk` serving
   streamable HTTP is only flagged when the stateless opt-in appears *nowhere*
   in the module that declares the requirement. Test files (`*_test.go`) and
@@ -308,7 +311,11 @@ the absence of the modern surface is a defect.
   somewhere the scan cannot see — in another module, or from a config value —
   the finding is a false positive; it costs a warning and nothing else. It
   never fires for stdio servers, which need no opt-in, nor for `mcp-go`, which
-  advertises the revision by default.
+  advertises the revision by default. The absence is judged per *module*, not
+  per binary, so a module holding both a stateless and a stateful command —
+  a `cmd/` layout with several `main` packages — is not reported. Pairing them
+  more tightly would break the equally ordinary shape where the options value
+  is built in a shared helper package, which is the worse trade.
 - **An unclassifiable requirement is quiet, not exonerating.** A `replace`d
   module, a pseudo-version and a `+incompatible` tag produce no MCP011 finding
   — and equally no modern-era evidence, because none is available. The
@@ -398,7 +405,7 @@ scripts/ecosystem-report.mjs registry-wide readiness snapshot
 ```
 
 ```bash
-npm test              # node --test via tsx; 214 assertions, no network
+npm test              # node --test via tsx; 217 assertions, no network
 npm run typecheck
 npm run build:bundles # regenerate both copies of the engine; CI fails if stale
 ```
