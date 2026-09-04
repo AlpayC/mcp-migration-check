@@ -71,7 +71,12 @@ const SIGNAL_PATTERNS: Record<string, RegExp> = {
    * stdio server matches neither and is modern on the SDK version alone.
    */
   goStreamableHttp:
-    /\bStreamableHTTP(?:Handler|Options)\b|\bStreamableServerTransport\b|\bNewStreamableHTTPServer\b/,
+    // No leading `\b`: the official constructor is `NewStreamableHTTPHandler`,
+    // and a boundary before `Streamable` cannot match inside it. Requiring one
+    // let the exact case this signal exists for slip through — a server that
+    // passes `nil` options never names `StreamableHTTPOptions` at all, so the
+    // handler call is the only thing to see.
+    /StreamableHTTP(?:Handler|Options|Server)\b|\bStreamableServerTransport\b/,
   /**
    * Go: the stateless opt-in, in either SDK's spelling.
    *

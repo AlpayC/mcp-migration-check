@@ -578,3 +578,48 @@ test("the scan is not hung by a fifo with a scannable name", async (t) => {
     assert.equal(scanned, 1, "only the regular file should be read");
   });
 });
+
+test("the Go streamable-HTTP signal matches the constructor, not just the option type", async () => {
+  // Regression. The signal was first written as `\bStreamableHTTPHandler\b`,
+  // which cannot match inside `NewStreamableHTTPHandler` — there is no word
+  // boundary after `New`. A server that passes `nil` for its options never
+  // names `StreamableHTTPOptions` either, so the one case MCP011's second hit
+  // exists to catch was the one case that escaped it entirely.
+  await withTempDir(async (dir) => {
+    await fs.writeFile(
+      path.join(dir, "main.go"),
+      [
+        "package main",
+        "",
+        'import "github.com/modelcontextprotocol/go-sdk/mcp"',
+        "",
+        "func main() {",
+        "\th := mcp.NewStreamableHTTPHandler(getServer, nil)",
+        "\t_ = h",
+        "}",
+      ].join("\n"),
+    );
+    const result = await scanSource(dir);
+    assert.equal(result.matches.goStreamableHttp.length, 1);
+    assert.equal(result.matches.goStatelessOptIn.length, 0);
+  });
+});
+
+test("the Go stateless opt-in signal matches both SDKs' spellings", async () => {
+  await withTempDir(async (dir) => {
+    await fs.writeFile(
+      path.join(dir, "main.go"),
+      [
+        "package main",
+        "",
+        "func main() {",
+        "\topts := &mcp.StreamableHTTPOptions{Stateless: true}",
+        "\tsrv := server.NewStreamableHTTPServer(s, server.WithStateLess(true))",
+        "\t_, _ = opts, srv",
+        "}",
+      ].join("\n"),
+    );
+    const result = await scanSource(dir);
+    assert.equal(result.matches.goStatelessOptIn.length, 2);
+  });
+});
