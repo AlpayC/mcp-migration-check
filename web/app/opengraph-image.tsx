@@ -43,7 +43,7 @@ export default function Image() {
             color: OG.muted,
           }}
         >
-          Probe a live endpoint or scan a TypeScript, Python or Rust server for
+          Probe a live endpoint or scan a TypeScript, Python, Rust or Go server for
           the 2026-07-28 spec break.
         </div>
       </OgFrame>

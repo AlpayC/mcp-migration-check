@@ -5,7 +5,7 @@ description: Diagnose and carry out the migration of an MCP server to the 2026-0
 
 # MCP 2026-07-28 migration
 
-The 2026-07-28 revision is a refactor, not a version bump. Five things this
+The 2026-07-28 revision is a refactor, not a version bump. Six things this
 checker looks for break existing servers:
 
 1. **The transport is stateless.** The `initialize`/`notifications/initialized`
@@ -46,8 +46,18 @@ above. There *is* an official codemod, and it is a separate package:
 npx @modelcontextprotocol/codemod@latest v1-to-v2 .
 ```
 
-The other Tier 1 SDKs moved differently: C# to a 2.x major, Go to a 1.x minor.
-Check the actual package before advising a version.
+6. **The Go SDK moved by a minor, on the same module path.**
+   `github.com/modelcontextprotocol/go-sdk` speaks 2026-07-28 from **v1.7.0**;
+   v1.6.1 is the last release on 2025-11-25. There is no `go-sdk/v2` — the
+   module proxy 404s it — so never advise an import-path change or a 2.x.
+   `github.com/mark3labs/mcp-go` crossed at its own **v1.0.0**. And for the
+   official SDK the upgrade is only half of it: the streamable HTTP transport
+   serves the revision **only** with `StreamableHTTPOptions.Stateless = true`.
+   Left unset, clients negotiate down to 2025-11-25. A stdio server needs no
+   such flag.
+
+C# moved differently again — a 2.x major of the `ModelContextProtocol`
+packages. Check the actual package before advising a version.
 
 Work in this order: diagnose, triage, remediate, re-verify. The diagnosis step
 is scripted so it gives the same answer every time — resist the urge to skip it
@@ -77,8 +87,8 @@ running. They see different things and neither is a superset of the other:
 
 | | Source scan | Live probe |
 |---|---|---|
-| Sees | code, `package.json`, Python manifests, `file:line` | both protocol eras, headers, advertised capabilities, OAuth posture |
-| Finds | MCP001–005, **MCP007/MCP009/MCP010** (SDK lines) | MCP001–006, **MCP008**, MCP101/102 |
+| Sees | code, `package.json`, Python manifests, `Cargo.toml`, `go.mod`, `file:line` | both protocol eras, headers, advertised capabilities, OAuth posture |
+| Finds | MCP001–005, **MCP007/MCP009/MCP010/MCP011** (SDK lines) | MCP001–006, **MCP008**, MCP101/102 |
 | Needs | a checkout | a reachable endpoint |
 
 Exit codes: `0` no critical findings · `1` at least one critical · `2`
@@ -118,14 +128,20 @@ it end to end.
 Sequence matters. Do it in this order, because later steps depend on earlier
 ones:
 
-1. **The SDK finding first** — MCP007 for TypeScript, MCP009 for Python, MCP010 for Rust. Doing
+1. **The SDK finding first** — MCP007 for TypeScript, MCP009 for Python, MCP010
+   for Rust, MCP011 for Go. Doing
    this before the code changes means you refactor against the API you are
    going to keep, instead of refactoring twice. For MCP007, move to the v2
    packages and run the TypeScript codemod. For MCP009, move `mcp` to 2.x and
    follow the official Python migration guide (`FastMCP` → `MCPServer` is the
    first import change). For MCP010, upgrade to `rmcp` 3.x or `rust-mcp-sdk` 2.x
    (both speak spec 2026-07-28). For `tower-mcp`, enable the
-   `protocol-2026-07-28` feature. The remaining errors point at the architectural work.
+   `protocol-2026-07-28` feature. For MCP011, `go get
+   github.com/modelcontextprotocol/go-sdk@v1.7.0` — the module path is
+   unchanged, so nothing imports differently — and if you serve streamable
+   HTTP, set `StreamableHTTPOptions.Stateless: true`, because the upgrade alone
+   leaves clients negotiating down to 2025-11-25.
+   The remaining errors point at the architectural work.
 2. **MCP002 (session state)** — the deepest change, and the one most likely to
    surface hidden design assumptions.
 3. **MCP001 (legacy-only)** — add the modern request path and

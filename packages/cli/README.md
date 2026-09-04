@@ -44,10 +44,10 @@ mcp-migration-check --local <url>    Allow localhost/private targets (SSRF guard
 mcp-migration-check ... --json       Machine-readable output
 ```
 
-A source scan covers **TypeScript, Python, and Rust** servers, reading
-`package.json`, Python project metadata and `Cargo.toml` respectively for the
-SDK rules below. Go source is scanned for the language-neutral signals, but has
-no SDK rule yet. A live probe works against any server, in any language.
+A source scan covers **TypeScript, Python, Rust, and Go** servers, reading
+`package.json`, Python project metadata, `Cargo.toml` and `go.mod` respectively
+for the SDK rules below. C# source is scanned for the language-neutral signals,
+but has no SDK rule yet. A live probe works against any server, in any language.
 
 Exit codes: `0` no critical findings · `1` at least one critical finding ·
 `2` inconclusive (unreachable, blocked, or nothing to scan). That makes it
@@ -68,6 +68,7 @@ usable as a CI gate directly, or via the
 | MCP008 | warning  | modern server that does not implement `server/discover`             |
 | MCP009 | warning  | Python `mcp` constrained to 1.x or importing the v1 `FastMCP` API   |
 | MCP010 | warning  | Rust MCP crate on a pre-2026-07-28 line (source scan only)           |
+| MCP011 | warning  | Go MCP SDK that cannot serve 2026-07-28 (source scan only)          |
 | MCP101 | info     | dual-era: current **and** still accepts the legacy handshake        |
 | MCP102 | info     | session ids issued to legacy clients only                           |
 
@@ -76,8 +77,8 @@ keep answering the old handshake alongside the new surface, so the `MCP1xx`
 rules are reported for information and cost zero points. Only serving the
 legacy protocol _alone_ is graded — that is MCP001.
 
-**Eleven rules are not the whole revision** — a server can pass all eleven and still
-be broken. The source scan is heuristic and can over-match; the live probe only
+**Thirteen rules are not the whole revision** — a server can pass all thirteen and
+still be broken. The source scan is heuristic and can over-match; the live probe only
 sees the outside. This is triage, not a conformance suite. The full list of
 limitations is in the
 [repository README](https://github.com/AlpayC/mcp-migration-check#honest-limitations).

@@ -5,7 +5,7 @@ import "./globals.css";
 
 const SITE_URL = "https://mcp-migration-check.alpaycelik.workers.dev";
 const DESCRIPTION =
-  "Check a live MCP endpoint or scan a TypeScript, Python or Rust server for the 2026-07-28 spec break — deterministic, no data stored.";
+  "Check a live MCP endpoint or scan a TypeScript, Python, Rust or Go server for the 2026-07-28 spec break — deterministic, no data stored.";
 
 export const metadata: Metadata = {
   // Required for the `opengraph-image` convention to emit absolute URLs.

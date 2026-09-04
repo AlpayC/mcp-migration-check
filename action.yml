@@ -11,7 +11,7 @@ inputs:
     description: "Live MCP endpoint to probe (http/https). Takes precedence over `source`."
     required: false
   source:
-    description: "Directory to scan statically, including TypeScript, Python and Rust MCP projects. Defaults to the checked-out repository."
+    description: "Directory to scan statically, including TypeScript, Python, Rust and Go MCP projects. Defaults to the checked-out repository."
     required: false
     default: "."
   fail-on:
