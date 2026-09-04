@@ -12,7 +12,9 @@ npm run typecheck    # engine + tests, then web separately
 ```
 
 CI runs the same commands plus a Next build, a check that the bundled skill is
-in sync, and the two fixtures. A pull request needs all of it green.
+in sync, and the fixture assertions: every repository under
+`skill/mcp-migration-workspace/fixtures` is scanned and checked against the
+findings it is supposed to produce. A pull request needs all of it green.
 
 ## The one thing that catches everyone
 
