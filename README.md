@@ -292,9 +292,18 @@ the absence of the modern surface is a defect.
   replaced module can still be.
 - **MCP011's second case argues from absence.** A modern `go-sdk` serving
   streamable HTTP is only flagged when the stateless opt-in appears *nowhere*
-  in the scanned source. If your server sets `Stateless` somewhere the scan
-  cannot see — built in another module, or behind a config flag — the finding
-  is a false positive. It never fires for stdio servers, which need no opt-in.
+  in the module that declares the requirement. Test files (`*_test.go`) and
+  commented-out code are excluded from both halves of that judgement, and
+  `WithStateLess(false)` is read as what it is. If your server sets `Stateless`
+  somewhere the scan cannot see — in another module, or from a config value —
+  the finding is a false positive; it costs a warning and nothing else. It
+  never fires for stdio servers, which need no opt-in, nor for `mcp-go`, which
+  advertises the revision by default.
+- **An unclassifiable requirement is quiet, not exonerating.** A `replace`d
+  module, a pseudo-version and a `+incompatible` tag produce no MCP011 finding
+  — and equally no modern-era evidence, because none is available. The
+  language-neutral heuristics behind MCP001 and MCP002 still apply to that
+  repository exactly as they would to one with no manifest at all.
 
 ## Two rules that were wrong
 

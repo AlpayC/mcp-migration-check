@@ -623,3 +623,148 @@ test("the Go stateless opt-in signal matches both SDKs' spellings", async () => 
     assert.equal(result.matches.goStatelessOptIn.length, 2);
   });
 });
+
+// ── what the Go signals must NOT do to other languages ──────────────────
+//
+// Every case here was a real regression, found by adversarial review after the
+// first implementation shipped bare identifiers into the language-neutral map.
+
+test("Go SDK identifiers do not fire on TypeScript, Python or Rust source", async () => {
+  // `SIGNAL_PATTERNS` runs over every language, so an unqualified Go
+  // identifier there becomes a false positive in three other ecosystems. A
+  // two-line TypeScript file declaring these went from a clean A to a D with a
+  // critical.
+  for (const ext of ["ts", "py", "rs"]) {
+    await withTempDir(async (dir) => {
+      await fs.writeFile(
+        path.join(dir, `sample.${ext}`),
+        "CreateMessageRequest SessionIdManager AddRoots RemoveRoots EnableSampling NewLoggingHandler",
+      );
+      const r = await scanSource(dir);
+      for (const signal of ["sessionId", "sampling", "roots", "logging", "initialize"]) {
+        assert.deepEqual(r.matches[signal], [], `${signal} must stay quiet in .${ext}`);
+      }
+    });
+  }
+});
+
+test("unqualified lookalikes in Go source stay quiet", async () => {
+  // An ordinary Go project: a workspace with roots, OpenTelemetry head
+  // sampling, a slog handler constructor. None of it is MCP.
+  await withTempDir(async (dir) => {
+    await fs.writeFile(
+      path.join(dir, "main.go"),
+      [
+        "package p",
+        "func NewLoggingHandler(n slog.Handler) slog.Handler { return n }",
+        "func (w *Workspace) AddRoots(rs []string) {}",
+        "type CreateMessageRequest struct{}",
+        "type SessionIdManager struct{}",
+        "var EnableSampling bool",
+      ].join("\n"),
+    );
+    const r = await scanSource(dir);
+    for (const signal of ["sessionId", "sampling", "roots", "logging"]) {
+      assert.deepEqual(r.matches[signal], [], `${signal} must stay quiet`);
+    }
+  });
+});
+
+test("qualified Go SDK calls still fire", async () => {
+  // The other half: tightening must not silence real usage.
+  await withTempDir(async (dir) => {
+    await fs.writeFile(
+      path.join(dir, "main.go"),
+      [
+        "package p",
+        "func run() {",
+        "\topts := &mcp.ServerOptions{GetSessionID: gen}",
+        "\t_ = req.Session.Log(ctx, &mcp.LoggingMessageParams{})",
+        "\t_, _ = ss.ListRoots(ctx, &mcp.ListRootsParams{})",
+        "\tc := &mcp.ClientOptions{CreateMessageHandler: h}",
+        "\t_ = opts",
+        "\t_ = c",
+        "}",
+      ].join("\n"),
+    );
+    const r = await scanSource(dir);
+    for (const signal of ["sessionId", "logging", "roots", "sampling"]) {
+      assert.ok(r.matches[signal].length > 0, `${signal} should fire on qualified use`);
+    }
+  });
+});
+
+test("a quoted 2026-07-28 is not modern-era evidence", async () => {
+  // It was, briefly, and a `// TODO: we do not support "2026-07-28" yet` in a
+  // genuinely legacy TypeScript server silenced both of its criticals.
+  await withTempDir(async (dir) => {
+    await fs.writeFile(
+      path.join(dir, "index.ts"),
+      '// TODO(2027): we do not support "2026-07-28" yet.\n',
+    );
+    const r = await scanSource(dir);
+    assert.deepEqual(r.matches.modernEra, []);
+  });
+});
+
+test("a Go test file does not decide the production transport configuration", async () => {
+  // A compat test that builds a stateful handler must not convict the stdio
+  // server beside it, and a `Stateless: true` in a test must not acquit one.
+  await withTempDir(async (dir) => {
+    await fs.writeFile(
+      path.join(dir, "compat_test.go"),
+      "package p\nfunc TestX() { h := mcp.NewStreamableHTTPHandler(g, nil); _ = h }\n",
+    );
+    const r = await scanSource(dir);
+    assert.deepEqual(r.matches.goStreamableHttp, []);
+    assert.deepEqual(r.matches.goStatelessOptIn, []);
+  });
+});
+
+test("a commented-out or negated stateless opt-in does not count", async () => {
+  await withTempDir(async (dir) => {
+    await fs.writeFile(
+      path.join(dir, "main.go"),
+      [
+        "package p",
+        "// TODO(2027): set Stateless: true once the session store is gone.",
+        "// srv := server.NewStreamableHTTPServer(s, server.WithStateLess(false))",
+        "func run() { _ = server.NewStreamableHTTPServer(s, server.WithStateLess(false)) }",
+      ].join("\n"),
+    );
+    const r = await scanSource(dir);
+    assert.deepEqual(r.matches.goStatelessOptIn, [], "neither a comment nor false is an opt-in");
+  });
+});
+
+test("parseGoMod does not treat inherited Object properties as modules", async () => {
+  // `"toString" in {}` is true and MCP_GO_MODULES["toString"] is a function,
+  // whose [0] is undefined, and every `<` against undefined is false — so this
+  // line fabricated a "modern" dependency and bought a grade. go.mod is
+  // untrusted input when this runs as a GitHub Action over a pull request.
+  for (const junk of ["toString", "constructor", "valueOf", "hasOwnProperty", "__proto__"]) {
+    const deps = parseGoMod(`require (\n\t${junk} v1.0.0\n)`);
+    assert.deepEqual(deps, [], `${junk} must not be read as a module`);
+    assert.equal(classifyGoSdkVersion(junk, "v1.0.0"), "unknown", junk);
+  }
+});
+
+test("`// indirect` must be the comment's first field, as Go itself requires", () => {
+  const direct = parseGoMod(
+    `require ${GO_SDK} v1.7.0 // pinned 2026-08; no longer indirect`,
+  );
+  assert.equal(direct[0].indirect, undefined, "prose mentioning the word is not the marker");
+
+  const indirect = parseGoMod(`require ${GO_SDK} v1.6.1 // indirect`);
+  assert.equal(indirect[0].indirect, true);
+
+  const semicolon = parseGoMod(`require ${GO_SDK} v1.6.1 // indirect; see #418`);
+  assert.equal(semicolon[0].indirect, true);
+});
+
+test("parseGoMod unquotes module and version tokens", () => {
+  const deps = parseGoMod(`require "${GO_SDK}" "v1.6.1"`);
+  assert.equal(deps.length, 1);
+  assert.equal(deps[0].name, GO_SDK);
+  assert.equal(deps[0].sdkLine, "legacy");
+});

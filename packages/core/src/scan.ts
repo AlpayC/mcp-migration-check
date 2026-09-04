@@ -51,41 +51,23 @@ const IGNORED_DIRS = new Set([
   ".gomodcache",
 ]);
 
+/**
+ * Language-neutral signals. These run over every scannable file, so every
+ * alternative here has to be a token that means the same thing in TypeScript,
+ * Python, Rust and Go alike. Anything language-specific belongs in
+ * `GO_SIGNAL_PATTERNS` below — an identifier added here that is only idiomatic
+ * in one language becomes a false positive in the other three.
+ */
 const SIGNAL_PATTERNS: Record<string, RegExp> = {
-  initialize:
-    /InitializeRequest|oninitialized|on_initialized|notifications\/initialized|["']initialize["']|["']initialized["']|\bInitializedHandler\b|\bmcp\.Initialized(?:Params|Request)\b|\.InitializeParams\(\)|\b(?:Add|On)(?:Before|After)Initialize\b/,
+  initialize: /InitializeRequest|oninitialized|on_initialized|notifications\/initialized|["']initialize["']|["']initialized["']/,
   sessionId:
-    /[Mm]cp-[Ss]ession-[Ii]d|mcpSessionId|mcp_session_id|get_session_id|session_id_generator|stateless_http\s*=\s*False|\bsessionId\b|\bGetSessionID\s*[:=]|SessionIdManager|\bHeader(?:Key)?SessionID\b/,
+    /[Mm]cp-[Ss]ession-[Ii]d|mcpSessionId|mcp_session_id|get_session_id|session_id_generator|stateless_http\s*=\s*False|\bsessionId\b/,
   logging:
-    /["']logging["']|LoggingLevel|LoggingMessageNotification|send_log_message|\b(?:ctx|context)\.(?:debug|info|warning|error|critical|log)\s*\(|\blogging\b\s*:\s*\{|\bLoggingMessageParams\b|\bNewLoggingHandler\b|\bSendLogMessageToClient\b|\bserver\.WithLogging\s*\(/,
+    /["']logging["']|LoggingLevel|LoggingMessageNotification|send_log_message|\b(?:ctx|context)\.(?:debug|info|warning|error|critical|log)\s*\(|\blogging\b\s*:\s*\{/,
   sampling:
-    /["']sampling["']|createMessage|create_message|SamplingMessage|\bsampling\b\s*:\s*\{|\bCreateMessage(?:Params|Result|Request|Handler)\b|\b(?:EnableSampling|RequestSampling|WithSamplingHandler)\b/,
+    /["']sampling["']|createMessage|create_message|SamplingMessage|\bsampling\b\s*:\s*\{/,
   roots:
-    /["']roots["']|ListRootsRequest|RootsCapability|list_roots|\broots\b\s*:\s*\{|\bListRoots(?:Params|Result)\b|\b(?:AddRoots|RemoveRoots|RequestRoots|WithRootsHandler)\b|\bserver\.WithRoots\s*\(/,
-  /**
-   * Go: a streamable-HTTP server is being configured.
-   *
-   * Only meaningful next to `goStatelessOptIn`. The official Go SDK refuses to
-   * serve `2026-07-28` over this transport unless it is stateless, so the pair
-   * "HTTP transport present, stateless opt-in absent" is what MCP011 reads. A
-   * stdio server matches neither and is modern on the SDK version alone.
-   */
-  goStreamableHttp:
-    // No leading `\b`: the official constructor is `NewStreamableHTTPHandler`,
-    // and a boundary before `Streamable` cannot match inside it. Requiring one
-    // let the exact case this signal exists for slip through — a server that
-    // passes `nil` options never names `StreamableHTTPOptions` at all, so the
-    // handler call is the only thing to see.
-    /StreamableHTTP(?:Handler|Options|Server)\b|\bStreamableServerTransport\b/,
-  /**
-   * Go: the stateless opt-in, in either SDK's spelling.
-   *
-   * NOT modern-era evidence on its own — `StreamableHTTPOptions.Stateless` has
-   * existed since go-sdk v1.3.1, long before the revision. It is only ever read
-   * as the absence-check above.
-   */
-  goStatelessOptIn:
-    /\bStateless\s*:\s*true\b|\.Stateless\s*=\s*true\b|\bWithStateLess\s*\(|\bStatelessSessionIdManager\b/,
+    /["']roots["']|ListRootsRequest|RootsCapability|list_roots|\broots\b\s*:\s*\{/,
   /** The official Python SDK's v1 high-level server import. */
   pythonV1Sdk:
     /\bfrom\s+mcp\.server\.fastmcp(?:\.[A-Za-z_][\w.]*)?\s+import\b|\bimport\s+mcp\.server\.fastmcp\b/,
@@ -108,23 +90,71 @@ const SIGNAL_PATTERNS: Record<string, RegExp> = {
    * on it. A dependency on the v2 npm packages counts too — that line has no
    * legacy mode to be confused with.
    *
-   * The Go alternatives are the exported names that appear only in the modern
-   * SDKs (`MetaKeyProtocolVersion…`, `ProtocolVersion20260728`,
-   * `mcp.DiscoverResult`, `subscriptions/listen`). The date literal must be
-   * QUOTED — a bare `2026-07-28` in a `// TODO: migrate` comment must not
-   * silence the checker. And note what is deliberately absent: no
-   * `protocolVersion2026…` pattern, because go-sdk v1.6.0/v1.6.1 declare an
-   * unused `protocolVersion20260630` and such a pattern would misfire on the
-   * legacy line.
-   *
-   * For Go this regex is the smaller half of the story. A modern Go server
-   * frequently spells nothing modern at all — the SDK answers `server/discover`
-   * internally — so `go.mod` carries the evidence instead. See the feed in
-   * `scanSource`.
+   * Note what is deliberately NOT here: the literal date `"2026-07-28"`. It was
+   * added for Go and removed again, because quoting is not what separates
+   * evidence from mention. A comment reading `we do not support "2026-07-28"
+   * yet`, or a test asserting a server negotiates *down* from it, both matched
+   * — and silenced MCP001 and MCP002 on genuinely legacy servers in every
+   * language. Go's evidence comes from `go.mod` instead; see `scanSource`.
    */
   modernEra:
-    /io\.modelcontextprotocol\/(protocolVersion|clientCapabilities|clientInfo|serverInfo)|["']server\/discover["']|@modelcontextprotocol\/(server|client|core)\b|\bfrom\s+mcp\.server\s+import\s+[^#\n]*\bMCPServer\b|\bfrom\s+mcp\.server\.mcpserver(?:\.[A-Za-z_][\w.]*)?\s+import\b|\bMetaKey(?:ProtocolVersion|ClientInfo|ServerInfo|ClientCapabilities|SubscriptionID)\b|\bProtocolVersion20260728\b|\bmcp\.Discover(?:Params|Result)\b|["']subscriptions\/listen["']|["']2026-07-28["']/,
+    /io\.modelcontextprotocol\/(protocolVersion|clientCapabilities|clientInfo|serverInfo)|["']server\/discover["']|@modelcontextprotocol\/(server|client|core)\b|\bfrom\s+mcp\.server\s+import\s+[^#\n]*\bMCPServer\b|\bfrom\s+mcp\.server\.mcpserver(?:\.[A-Za-z_][\w.]*)?\s+import\b/,
 };
+
+/**
+ * Signals that only run over `.go` files.
+ *
+ * Every alternative is qualified — `mcp.`, `server.`, `client.`, or a method
+ * call on a receiver — and that is not stylistic. An earlier version matched
+ * bare identifiers such as `AddRoots`, `EnableSampling`, `NewLoggingHandler`
+ * and `SessionIdManager`, and because `SIGNAL_PATTERNS` runs over every
+ * language, a two-line TypeScript file declaring `CreateMessageRequest` and
+ * `SessionIdManager` went from a clean A to a D with a *critical*. Ordinary Go
+ * projects with an unrelated `AddRoots` or an OpenTelemetry `EnableSampling`
+ * did the same. The SDK types are always written qualified in user code, so
+ * requiring the qualifier costs nothing and stops all of it.
+ */
+const GO_SIGNAL_PATTERNS: Record<string, RegExp> = {
+  initialize:
+    /\bmcp\.Initialized?(?:Params|Request|Result)\b|\.InitializeParams\s*\(\)|\.(?:Add|On)(?:Before|After)Initialize\b|\bInitializedHandler\s*:/,
+  sessionId: /\bGetSessionID\s*[:=]|\bserver\.WithSessionIdManager(?:Resolver)?\s*\(/,
+  logging:
+    /\bmcp\.LoggingMessageParams\b|\bmcp\.NewLoggingHandler\s*\(|\bserver\.WithLogging\s*\(|\.SendLogMessageToClient\s*\(/,
+  sampling:
+    /\bmcp\.CreateMessage(?:Params|Result|Request)\b|\bCreateMessageHandler\s*:|\.(?:EnableSampling|RequestSampling)\s*\(|\bclient\.WithSamplingHandler\s*\(/,
+  roots:
+    /\bmcp\.ListRoots(?:Params|Result)\b|\bserver\.WithRoots\s*\(|\.(?:AddRoots|RemoveRoots|RequestRoots)\s*\(|\bclient\.WithRootsHandler\s*\(/,
+  modernEra:
+    /\bmcp\.MetaKey(?:ProtocolVersion|ClientInfo|ServerInfo|ClientCapabilities|SubscriptionID)\b|\bmcp\.ProtocolVersion20260728\b|\bmcp\.Discover(?:Params|Result)\b|["']subscriptions\/listen["']/,
+};
+
+/**
+ * Transport-configuration signals, read as a PAIR and only from non-test Go
+ * files.
+ *
+ * MCP011's second hit argues from the absence of the opt-in, and an argument
+ * from absence is only as good as what it is allowed to look at. A
+ * `compat_test.go` that spins up a stateful handler to regression-test legacy
+ * clients would otherwise convict the production server beside it, and a
+ * `Stateless: true` in some other module's test file would acquit one that is
+ * genuinely misconfigured. Comments are stripped before matching for the same
+ * reason: `// TODO: set Stateless: true once the session store is gone` is a
+ * confession, not a configuration.
+ */
+const GO_TRANSPORT_PATTERNS: Record<string, RegExp> = {
+  goStreamableHttp: /StreamableHTTP(?:Handler|Options|Server)\b|\bStreamableServerTransport\b/,
+  // `WithStateLess` takes a bool, so the argument has to be read: passing
+  // `false` is an explicit declaration of statefulness, not an opt-in.
+  goStatelessOptIn:
+    /\bStateless\s*:\s*true\b|\.Stateless\s*=\s*true\b|\bWithStateLess\s*\(\s*true\s*\)|\bStatelessSessionIdManager\b/,
+};
+
+/** Drop a `//` line comment. Go string literals containing `//` do not matter
+ *  to the patterns above, none of which can match inside a URL. */
+function stripGoLineComment(line: string): string {
+  const at = line.indexOf("//");
+  return at === -1 ? line : line.slice(0, at);
+}
 
 export interface ScanOptions {
   maxFiles?: number;
@@ -140,6 +170,8 @@ export async function scanSource(
 
   const matches: Record<string, SourceMatch[]> = {};
   for (const key of Object.keys(SIGNAL_PATTERNS)) matches[key] = [];
+  for (const key of Object.keys(GO_SIGNAL_PATTERNS)) matches[key] ??= [];
+  for (const key of Object.keys(GO_TRANSPORT_PATTERNS)) matches[key] ??= [];
 
   let filesScanned = 0;
   const files = await collectFiles(dir, maxFiles);
@@ -151,17 +183,35 @@ export async function scanSource(
     const content = await readIfSmallEnough(file, maxBytes);
     if (content === null) continue;
     filesScanned++;
+    const relative = path.relative(dir, file);
+    const isGo = path.extname(file) === ".go";
+    // A Go test file may legitimately exercise the legacy path, so it must not
+    // decide how the production transport beside it is configured.
+    const isGoTest = isGo && file.endsWith("_test.go");
+
+    const applicable: Record<string, RegExp>[] = [SIGNAL_PATTERNS];
+    if (isGo) applicable.push(GO_SIGNAL_PATTERNS);
+
     const lines = content.split(/\r?\n/);
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
-      for (const [signal, re] of Object.entries(SIGNAL_PATTERNS)) {
-        if (re.test(line)) {
-          matches[signal].push({
-            file: path.relative(dir, file),
-            line: i + 1,
-            text: line.trim().slice(0, 200),
-          });
+      const record = (signal: string) =>
+        matches[signal].push({
+          file: relative,
+          line: i + 1,
+          text: line.trim().slice(0, 200),
+        });
+
+      for (const patterns of applicable) {
+        for (const [signal, re] of Object.entries(patterns)) {
+          if (re.test(line)) record(signal);
         }
+      }
+
+      if (!isGo || isGoTest) continue;
+      const code = stripGoLineComment(line);
+      for (const [signal, re] of Object.entries(GO_TRANSPORT_PATTERNS)) {
+        if (re.test(code)) record(signal);
       }
     }
   }
@@ -198,20 +248,21 @@ export async function scanSource(
   // evidence, every Go repository would be scored as though it had never
   // migrated — which is the exact failure `modernEra` exists to prevent.
   //
-  // The gate is what keeps that from over-correcting. The official SDK's
-  // streamable HTTP transport serves `2026-07-28` only when it is configured
-  // stateless — `SupportsProtocolVersion` returns `t.Stateless && …` — so a
-  // stateful HTTP server on v1.7.0 genuinely cannot serve a modern client and
-  // must not be handed the counterweight. That is the case MCP011 reports, and
-  // the two have to agree. A stdio server matches no HTTP signal and is modern
-  // on its module version alone, which is correct: stdio does not implement
-  // the version-restricting interface at all.
-  const goHttpWithoutStateless =
-    matches.goStreamableHttp.length > 0 && matches.goStatelessOptIn.length === 0;
+  // It is deliberately NOT gated on how the HTTP transport is configured, and
+  // that separation was learned the hard way. Withholding the counterweight
+  // from a stateful v1.7.0 server did not merely suppress a warning: it turned
+  // MCP002 back on and charged a *critical* for a `sessionId` tool argument —
+  // the very pattern MCP002's own fix recommends. Worse, it did so for
+  // mark3labs servers too, which MCP011 explicitly exempts, so the rule and
+  // the gate disagreed about the one asymmetry the design was built around.
+  //
+  // The two questions are genuinely separate. "Does this project depend on an
+  // SDK that speaks the revision?" is what `modernEra` answers, and `go.mod`
+  // answers it. "Is the transport configured to actually serve it?" is a
+  // different question, and MCP011 is where it belongs.
   for (const dep of sdkDependencies) {
     if (dep.ecosystem !== "go" || dep.sdkLine !== "modern") continue;
     if (dep.indirect || dep.replaced) continue;
-    if (goHttpWithoutStateless) continue;
     matches.modernEra.push({
       file: dep.manifest,
       line: dep.line ?? 0,
@@ -717,8 +768,14 @@ const GO_PSEUDO_VERSION = /[-.]\d{14}-[0-9a-f]{12}$/;
  * this project has already paid for one of those.
  */
 export function classifyGoSdkVersion(module: string, version: string): GoSdkLine {
+  // `Object.hasOwn`, not `in`. `"toString" in {}` is true and
+  // `MCP_GO_MODULES["toString"]` is a function, whose `[0]` is undefined, and
+  // every `<` against undefined is false — so a `go.mod` line reading
+  // `toString v1.0.0` fabricated a "modern" dependency, fed the counterweight
+  // and bought a grade. This runs as a GitHub Action over pull-request
+  // content, so `go.mod` is untrusted input.
+  if (!Object.hasOwn(MCP_GO_MODULES, module)) return "unknown";
   const threshold = MCP_GO_MODULES[module];
-  if (!threshold) return "unknown";
 
   const raw = version.trim();
   if (!raw || raw.endsWith("+incompatible") || GO_PSEUDO_VERSION.test(raw)) return "unknown";
@@ -733,13 +790,24 @@ export function classifyGoSdkVersion(module: string, version: string): GoSdkLine
   return "modern";
 }
 
-/** Strip a `//` comment, reporting whether it marked the line `// indirect`. */
+/**
+ * Strip a `//` comment, reporting whether it marked the requirement indirect.
+ *
+ * Go's own rule (`x/mod/modfile`) is that the comment's FIRST field must be
+ * `indirect` or `indirect;` — not that the word appears somewhere in it.
+ * Searching the whole comment was wrong in both directions, and both were
+ * reachable from an ordinary human comment: `// pinned 2026-08; no longer
+ * indirect` marked a direct modern requirement indirect and cost the project
+ * its counterweight, while `// direct dep; nothing here is indirect` made a
+ * genuinely legacy requirement invisible and graded it A.
+ */
 function stripGoComment(line: string): { text: string; indirect: boolean } {
   const at = line.indexOf("//");
   if (at === -1) return { text: line.trim(), indirect: false };
+  const first = line.slice(at + 2).trim().split(/\s+/)[0];
   return {
     text: line.slice(0, at).trim(),
-    indirect: /(^|\s)indirect(\s|$)/.test(line.slice(at + 2)),
+    indirect: first === "indirect" || first === "indirect;",
   };
 }
 
@@ -776,15 +844,19 @@ export function parseGoMod(content: string): SdkDependency[] {
   const noteReplace = (text: string): void => {
     // `replace a => b v1.0.0` and `replace a v1.2.3 => ./local` both name the
     // replaced module first.
-    const module = text.split(/\s+/)[0];
+    const module = text.split(/\s+/)[0]?.replace(/^"(.*)"$/, "$1");
     if (module) replaced.add(module);
   };
 
   const noteRequire = (text: string, lineNo: number, indirect: boolean): void => {
     const entry = text.match(/^(\S+)\s+(\S+)$/);
     if (!entry) return;
-    const [, name, constraint] = entry;
-    if (!(name in MCP_GO_MODULES)) return;
+    // go.mod's grammar admits quoted tokens. `go mod tidy` rewrites them, but
+    // the file is read as written, not as tidied.
+    const unquote = (token: string) => token.replace(/^"(.*)"$/, "$1");
+    const name = unquote(entry[1]);
+    const constraint = unquote(entry[2]);
+    if (!Object.hasOwn(MCP_GO_MODULES, name)) return;
     deps.push({
       ecosystem: "go",
       name,

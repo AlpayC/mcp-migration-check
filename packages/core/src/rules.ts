@@ -105,6 +105,46 @@ function loc(match?: SourceMatch): string | undefined {
 }
 
 /**
+ * Keep an untrusted manifest token out of a report at full length.
+ *
+ * `go.mod` is read from whatever the pull request contains, and the version
+ * token is interpolated into `detail`, which reaches the JSON report and the
+ * Action comment. Source-line matches are already capped at 200 characters;
+ * manifest tokens were not.
+ */
+function clamp(value: string, max = 80): string {
+  return value.length <= max ? value : `${value.slice(0, max)}…`;
+}
+
+/**
+ * A predicate for "this source file belongs to the module that `manifest`
+ * declares".
+ *
+ * Go repositories are routinely multi-module, and a signal collected across the
+ * whole scan root cannot be attributed to one of them. Ownership is the nearest
+ * enclosing `go.mod`, so a file under a deeper module belongs to that one, not
+ * to this — which is what stops a legacy sibling module from convicting a
+ * modern one.
+ */
+function ownedBy(
+  ctx: RuleContext,
+  manifest: string,
+  deps: SdkDependency[],
+): (match: SourceMatch) => boolean {
+  const dirOf = (m: string) => (m.includes("/") ? m.slice(0, m.lastIndexOf("/") + 1) : "");
+  const own = dirOf(manifest);
+  const deeper = deps
+    .map((d) => dirOf(d.manifest))
+    .filter((dir) => dir !== own && dir.startsWith(own));
+
+  return (match: SourceMatch) => {
+    const file = match.file.replace(/\\/g, "/");
+    if (!file.startsWith(own)) return false;
+    return !deeper.some((dir) => file.startsWith(dir));
+  };
+}
+
+/**
  * Does this target show any sign of serving the current revision?
  *
  * Live: the probe reached the modern surface. Source: the repository handles
@@ -448,7 +488,7 @@ export const rules: Rule[] = [
 
       // Every affected module is collected: reporting only the first hides the
       // second until the first is fixed. Same shape as MCP010.
-      const hits: { detail: string; fix: string }[] = [];
+      const hits: { detail: string; fix: string; manifest: string }[] = [];
 
       for (const dep of deps) {
         // An `// indirect` requirement is not this project's SDK choice — the
@@ -461,7 +501,8 @@ export const rules: Rule[] = [
           const target =
             dep.name === "github.com/mark3labs/mcp-go" ? "v1.0.0" : "v1.7.0";
           hits.push({
-            detail: `${dep.manifest} requires ${dep.name} ${dep.constraint}, which is below ${target} — the first release of that module speaking 2026-07-28.`,
+            manifest: dep.manifest,
+            detail: `${dep.manifest} requires ${dep.name} ${clamp(dep.constraint)}, which is below ${target} — the first release of that module speaking 2026-07-28.`,
             fix: `Upgrade ${dep.name} to ${target} or later (\`go get ${dep.name}@${target}\`), then run your tests. The module path does not change: Go crossed the protocol break inside its existing major, so there is no v2 import path to rewrite.`,
           });
         }
@@ -475,25 +516,29 @@ export const rules: Rule[] = [
       // StreamableHTTPOptions.Stateless = true. Leave it unset and clients
       // negotiate down to 2025-11-25."
       //
-      // Three conditions, all required, because this is an argument from
-      // absence and those are the ones that go wrong. It fires only for the
-      // official SDK (mark3labs advertises the revision by default), only when
-      // an HTTP transport is actually configured (a stdio server needs no flag
-      // and is the SDK's own headline example), and only when the opt-in
-      // appears nowhere in the scanned source — a whole-repository absence, not
-      // a missing token on one line.
-      const modernOfficial = deps.find(
-        (d) =>
-          d.name === "github.com/modelcontextprotocol/go-sdk" &&
-          d.sdkLine === "modern" &&
-          !d.indirect &&
-          !d.replaced,
-      );
-      const http = firstMatch(ctx, "goStreamableHttp");
-      const statelessOptIn = (ctx.source?.matches.goStatelessOptIn?.length ?? 0) > 0;
-      if (modernOfficial && http && !statelessOptIn) {
+      // Scoped to the module that declares the requirement, because this is an
+      // argument from absence and a repository-wide one was demonstrably
+      // wrong: with a modern module beside a legacy one, it produced the
+      // sentence "services/notes/go.mod requires v1.7.0 … but the transport at
+      // legacy/demo/main.go is configured without Stateless" — a specific,
+      // checkable claim about a file belonging to a different module.
+      //
+      // It fires only for the official SDK (mark3labs advertises the revision
+      // by default), only when an HTTP transport is configured in that module
+      // (a stdio server needs no flag and is the SDK's own headline example),
+      // and only when the opt-in appears nowhere in it.
+      for (const dep of deps) {
+        if (dep.name !== "github.com/modelcontextprotocol/go-sdk") continue;
+        if (dep.sdkLine !== "modern" || dep.indirect || dep.replaced) continue;
+
+        const owned = ownedBy(ctx, dep.manifest, deps);
+        const http = ctx.source?.matches.goStreamableHttp?.find(owned);
+        if (!http) continue;
+        if (ctx.source?.matches.goStatelessOptIn?.some(owned)) continue;
+
         hits.push({
-          detail: `${modernOfficial.manifest} requires ${modernOfficial.name} ${modernOfficial.constraint}, which speaks 2026-07-28, but the streamable HTTP transport at ${http.file}:${http.line} is configured without \`Stateless\`. That transport serves the revision only when it is stateless; left as is, clients negotiate down to 2025-11-25.`,
+          manifest: dep.manifest,
+          detail: `${dep.manifest} requires ${dep.name} ${clamp(dep.constraint)}, which speaks 2026-07-28, but the streamable HTTP transport at ${http.file}:${http.line} is configured without \`Stateless\`. That transport serves the revision only when it is stateless; left as is, clients negotiate down to 2025-11-25.`,
           fix: "Set `Stateless: true` in `StreamableHTTPOptions`, and move any per-session state onto explicit handles passed as tool arguments. Upgrading the module is not enough on its own — serving the revision over HTTP is a separate, deliberate choice. A stdio server needs no such flag.",
         });
       }
@@ -507,7 +552,7 @@ export const rules: Rule[] = [
         fix: hits.map((h) => h.fix).join(" "),
         specRef: SPEC.sdk,
         references: [SPEC.goSdk, SPEC.markThreeLabsMcpGo],
-        location: deps[0].manifest,
+        location: hits[0].manifest,
       };
     },
   },

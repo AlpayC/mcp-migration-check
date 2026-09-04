@@ -463,6 +463,39 @@ test("MCP011 does not apply the stateless requirement to mark3labs", () => {
   assert.ok(!ids({ source: ctx }).includes("MCP011"));
 });
 
+test("MCP011 blames the module that declares the requirement, not a sibling", () => {
+  // A repository-wide absence check produced the sentence "services/notes/go.mod
+  // requires v1.7.0 … but the transport at legacy/demo/main.go is configured
+  // without Stateless" — a specific, checkable claim about a file belonging to
+  // a different module. Ownership is the nearest enclosing go.mod.
+  const modern = goSdkDep(GO_SDK, "v1.7.0", { manifest: "services/notes/go.mod" });
+  const legacy = goSdkDep(GO_SDK, "v1.6.1", { manifest: "legacy/demo/go.mod" });
+  const ctx: SourceContext = {
+    matches: {
+      goStreamableHttp: [
+        { file: "legacy/demo/main.go", line: 9, text: "mcp.NewStreamableHTTPHandler(g, nil)" },
+      ],
+    },
+    sdkVersion: null,
+    filesScanned: 2,
+    sdkDependencies: [modern, legacy],
+  };
+  const f = evaluate({ source: ctx }).find((x) => x.ruleId === "MCP011");
+  assert.ok(f);
+  assert.equal(f.location, "legacy/demo/go.mod", "the finding belongs to the legacy module");
+  assert.ok(
+    !f.detail.includes("services/notes/go.mod"),
+    "the modern module must not be blamed for a sibling's transport",
+  );
+});
+
+test("MCP011 clamps an overlong version token before quoting it", () => {
+  const ctx = withGoDeps([goSdkDep(GO_SDK, `v1.6.1-${"a".repeat(400)}`)]);
+  const f = evaluate({ source: ctx }).find((x) => x.ruleId === "MCP011");
+  assert.ok(f);
+  assert.ok(f.detail.length < 300, `detail should be clamped, got ${f.detail.length}`);
+});
+
 test("MCP011 needs a checkout — a live probe cannot see go.mod", () => {
   assert.ok(!ids({ live: legacyOnly() }).includes("MCP011"));
 });
