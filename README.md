@@ -6,6 +6,7 @@
 [![Live demo](https://img.shields.io/badge/demo-live-37d399)](https://mcp-migration-check.alpaycelik.workers.dev)
 [![Claude Code plugin](https://img.shields.io/badge/Claude_Code-plugin-6d8bff)](#skill)
 [![License: MIT](https://img.shields.io/badge/license-MIT-6d8bff)](./LICENSE)
+[![MCP Migration Check publisher badge](https://img.shields.io/endpoint?url=https%3A%2F%2Fhol.org%2Fapi%2Fregistry%2Fbadges%2Fplugin%3Fslug%3Dalpayc%252Fmcp-migration-check%26metric%3Dpublisher%26style%3Dflat)](https://hol.org/registry/plugins/alpayc%2Fmcp-migration-check)
 
 **Will your MCP server survive the 2026-07-28 rewrite?**
 
